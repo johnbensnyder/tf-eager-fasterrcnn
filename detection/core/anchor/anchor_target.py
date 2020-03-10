@@ -10,7 +10,8 @@ class AnchorTarget(object):
                  num_rpn_deltas=256,
                  positive_fraction=0.5,
                  pos_iou_thr=0.7,
-                 neg_iou_thr=0.3):
+                 neg_iou_thr=0.3,
+                 batch_size=1):
         '''Compute regression and classification targets for anchors.
         
         Attributes
@@ -28,6 +29,7 @@ class AnchorTarget(object):
         self.positive_fraction = positive_fraction
         self.pos_iou_thr = pos_iou_thr
         self.neg_iou_thr = neg_iou_thr
+        self.batch_size = batch_size
 
     def build_targets(self, anchors, valid_flags, gt_boxes, gt_class_ids):
         '''Given the anchors and GT boxes, compute overlaps and identify positive
@@ -102,7 +104,8 @@ class AnchorTarget(object):
         # 1. Set negative anchors first. They get overwritten below if a GT box is
         # matched to them.
         anchor_iou_argmax = tf.argmax(overlaps, axis=1)
-        anchor_iou_max = tf.reduce_max(overlaps, reduction_indices=[1])
+        #anchor_iou_max = tf.reduce_max(overlaps, reduction_indices=[1])
+        anchor_iou_max = tf.reduce_max(overlaps, axis=[1])
         
         target_matchs = tf.where(anchor_iou_max < self.neg_iou_thr, 
                                  -tf.ones(anchors.shape[0], dtype=tf.int32), target_matchs)
@@ -117,7 +120,7 @@ class AnchorTarget(object):
 
         # 3. Set an anchor for each GT box (regardless of IoU value).        
         gt_iou_argmax = tf.argmax(overlaps, axis=0)
-        target_matchs = tf.scatter_update(tf.Variable(target_matchs), gt_iou_argmax, 1)
+        target_matchs = tf.compat.v1.scatter_update(tf.Variable(target_matchs), gt_iou_argmax, 1)
         
         
         # Subsample to balance positive and negative anchors
@@ -128,7 +131,7 @@ class AnchorTarget(object):
         if extra > 0:
             # Reset the extra ones to neutral
             ids = tf.random_shuffle(ids)[:extra]
-            target_matchs = tf.scatter_update(target_matchs, ids, 0)
+            target_matchs = tf.compat.v1.scatter_update(target_matchs, ids, 0)
         # Same for negative proposals
         ids = tf.where(tf.equal(target_matchs, -1))
         ids = tf.squeeze(ids, 1)
@@ -136,8 +139,8 @@ class AnchorTarget(object):
             tf.reduce_sum(tf.cast(tf.equal(target_matchs, 1), tf.int32)))
         if extra > 0:
             # Rest the extra ones to neutral
-            ids = tf.random_shuffle(ids)[:extra]
-            target_matchs = tf.scatter_update(target_matchs, ids, 0)
+            ids = tf.random.shuffle(ids)[:extra]
+            target_matchs = tf.compat.v1.scatter_update(target_matchs, ids, 0)
 
         
         # For positive anchors, compute shift and scale needed to transform them

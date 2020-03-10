@@ -8,6 +8,23 @@
 import tensorflow as tf
 layers = tf.keras.layers
 
+class BatchNormalization(layers.BatchNormalization):
+    """Extends the Keras BatchNormalization class to allow a central place
+    to make changes if needed.
+    Batch normalization has a negative effect on training if batches are small
+    so this layer is often frozen (via setting in Config class) and functions
+    as linear layer.
+    """
+    def call(self, inputs, training=None):
+        """
+        Note about training values:
+            None: Train BN layers. This is the normal mode
+            False: Freeze BN layers. Good when batch size is small
+            True: (don't use). Set layer in training mode even when making inferences
+        """
+        return super(self.__class__, self).call(inputs, training=training)
+
+
 class _Bottleneck(tf.keras.Model):
     def __init__(self, filters, block, 
                  downsampling=False, stride=1, **kwargs):
@@ -24,23 +41,27 @@ class _Bottleneck(tf.keras.Model):
         self.conv2a = layers.Conv2D(filters1, (1, 1), strides=(stride, stride),
                                     kernel_initializer='he_normal',
                                     name=conv_name_base + '2a')
-        self.bn2a = layers.BatchNormalization(name=bn_name_base + '2a')
+        #self.bn2a = layers.BatchNormalization(name=bn_name_base + '2a')
+        self.bn2a = BatchNormalization(name=bn_name_base + '2a')
 
         self.conv2b = layers.Conv2D(filters2, (3, 3), padding='same',
                                     kernel_initializer='he_normal',
                                     name=conv_name_base + '2b')
-        self.bn2b = layers.BatchNormalization(name=bn_name_base + '2b')
+        #self.bn2b = layers.BatchNormalization(name=bn_name_base + '2b')
+        self.bn2b = BatchNormalization(name=bn_name_base + '2b')
 
         self.conv2c = layers.Conv2D(filters3, (1, 1),
                                     kernel_initializer='he_normal',
                                     name=conv_name_base + '2c')
-        self.bn2c = layers.BatchNormalization(name=bn_name_base + '2c')
+        #self.bn2c = layers.BatchNormalization(name=bn_name_base + '2c')
+        self.bn2c = BatchNormalization(name=bn_name_base + '2c')
          
         if self.downsampling:
             self.conv_shortcut = layers.Conv2D(filters3, (1, 1), strides=(stride, stride),
                                                kernel_initializer='he_normal',
                                                name=conv_name_base + '1')
-            self.bn_shortcut = layers.BatchNormalization(name=bn_name_base + '1')     
+            #self.bn_shortcut = layers.BatchNormalization(name=bn_name_base + '1')     
+            self.bn_shortcut = BatchNormalization(name=bn_name_base + '1')     
     
     def __call__(self, inputs, training=False):
         x = self.conv2a(inputs)
@@ -87,7 +108,8 @@ class ResNet(tf.keras.Model):
                                    strides=(2, 2),
                                    kernel_initializer='he_normal',
                                    name='conv1')
-        self.bn_conv1 = layers.BatchNormalization(name='bn_conv1')
+        #self.bn_conv1 = layers.BatchNormalization(name='bn_conv1')
+        self.bn_conv1 = BatchNormalization(name='bn_conv1')
         self.max_pool = layers.MaxPooling2D((3, 3), strides=(2, 2), padding='same')
         
         self.res2a = _Bottleneck([64, 64, 256], block='2a',
