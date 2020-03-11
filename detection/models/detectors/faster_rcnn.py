@@ -10,11 +10,11 @@ from detection.models.detectors.test_mixins import RPNTestMixin, BBoxTestMixin
 from detection.core.bbox import bbox_target
 
 class FasterRCNN(tf.keras.Model, RPNTestMixin, BBoxTestMixin):
-    def __init__(self, num_classes, **kwags):
+    def __init__(self, num_classes, batch_size=1, **kwags):
         super(FasterRCNN, self).__init__(**kwags)
        
         self.NUM_CLASSES = num_classes
-        
+        self.BATCH_SIZE = batch_size
         # RPN configuration
         # Anchor attributes
         self.ANCHOR_SCALES = (32, 64, 128, 256, 512)
@@ -83,6 +83,7 @@ class FasterRCNN(tf.keras.Model, RPNTestMixin, BBoxTestMixin):
             positive_fraction=self.RPN_POS_FRAC,
             pos_iou_thr=self.RPN_POS_IOU_THR,
             neg_iou_thr=self.RPN_NEG_IOU_THR,
+            batch_size = self.BATCH_SIZE,
             name='rpn_head')
         
         self.roi_align = roi_align.PyramidROIAlign(
@@ -126,6 +127,7 @@ class FasterRCNN(tf.keras.Model, RPNTestMixin, BBoxTestMixin):
                     proposals, gt_boxes, gt_class_ids, img_metas)
         else:
             rois = proposals
+            #rois = tf.reshape(proposals, [-1, 5])
             
         pooled_regions = self.roi_align(
             (rois, rcnn_feature_maps, img_metas), training=training)

@@ -1,5 +1,6 @@
 import tensorflow as tf
 
+@tf.function(experimental_relax_shapes=True)
 def smooth_l1_loss(y_true, y_pred):
     '''Implements Smooth-L1 loss.
     
@@ -13,7 +14,7 @@ def smooth_l1_loss(y_true, y_pred):
     return loss
 
 
-
+@tf.function(experimental_relax_shapes=True)
 def rpn_class_loss(target_matchs, rpn_class_logits):
     '''RPN anchor classifier loss.
     
@@ -39,7 +40,7 @@ def rpn_class_loss(target_matchs, rpn_class_logits):
     loss = tf.reduce_mean(loss) if tf.size(loss) > 0 else tf.constant(0.0)
     return loss
 
-
+@tf.function(experimental_relax_shapes=True)
 def rpn_bbox_loss(target_deltas, target_matchs, rpn_deltas):
     '''Return the RPN bounding box loss graph.
     
@@ -68,9 +69,11 @@ def rpn_bbox_loss(target_deltas, target_matchs, rpn_deltas):
     rpn_deltas = tf.gather_nd(rpn_deltas, indices)
 
     # Trim target bounding box deltas to the same length as rpn_deltas.
-    batch_counts = tf.reduce_sum(tf.cast(tf.equal(target_matchs, 1), tf.int32), axis=1)
-    target_deltas = batch_pack(target_deltas, batch_counts,
-                              target_deltas.shape.as_list()[0])
+    # batch_counts = tf.reduce_sum(tf.cast(tf.equal(target_matchs, 1), tf.int32), axis=1)
+    # target_deltas = batch_pack(target_deltas, batch_counts,
+    #                           tf.shape(target_deltas)[0])
+    target_deltas = tf.gather_nd(target_deltas, 
+                tf.where(tf.reduce_mean(target_deltas, axis=2)!=0))
 
     loss = smooth_l1_loss(target_deltas, rpn_deltas)
     
@@ -78,10 +81,7 @@ def rpn_bbox_loss(target_deltas, target_matchs, rpn_deltas):
     
     return loss
 
-
-
-
-
+@tf.function(experimental_relax_shapes=True)
 def rcnn_class_loss(target_matchs, rcnn_class_logits):
     '''Loss for the classifier head of Faster RCNN.
     
@@ -105,7 +105,7 @@ def rcnn_class_loss(target_matchs, rcnn_class_logits):
     loss = tf.reduce_mean(loss) if tf.size(loss) > 0 else tf.constant(0.0)
     return loss
 
-
+@tf.function(experimental_relax_shapes=True)
 def rcnn_bbox_loss(target_deltas, target_matchs, rcnn_deltas):
     '''Loss for Faster R-CNN bounding box refinement.
     

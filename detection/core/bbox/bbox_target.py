@@ -90,7 +90,8 @@ class ProposalTarget(object):
             target_matchs: [num_rois]
             target_deltas: [num_rois, (dy, dx, log(dh), log(dw))]
         '''
-        H, W = img_shape
+        H = tf.cast(img_shape[0], tf.float32)
+        W = tf.cast(img_shape[1], tf.float32)
         
         
         trimmed_proposals, _ = trim_zeros(proposals[:, 1:])
@@ -98,7 +99,8 @@ class ProposalTarget(object):
         gt_boxes, non_zeros = trim_zeros(gt_boxes)
         gt_class_ids = tf.boolean_mask(gt_class_ids, non_zeros)
         
-        gt_boxes = gt_boxes / tf.constant([H, W, H, W], dtype=tf.float32)
+        #gt_boxes = gt_boxes / tf.constant([H, W, H, W], dtype=tf.float32)
+        gt_boxes = gt_boxes / tf.stack([H, W, H, W])
         
         overlaps = geometry.compute_overlaps(trimmed_proposals, gt_boxes)
         anchor_iou_argmax = tf.argmax(overlaps, axis=1)

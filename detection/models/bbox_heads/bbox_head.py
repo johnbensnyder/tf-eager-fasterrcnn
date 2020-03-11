@@ -123,7 +123,8 @@ class BBoxHead(tf.keras.Model):
             rois: [num_rois, (y1, x1, y2, x2)]
             img_shape: np.ndarray. [2]. (img_height, img_width)       
         '''
-        H, W = img_shape   
+        H = tf.cast(img_shape[0], tf.float32)
+        W = tf.cast(img_shape[1], tf.float32)  
         # Class IDs per ROI
         class_ids = tf.argmax(rcnn_probs, axis=1, output_type=tf.int32)
         
@@ -137,8 +138,10 @@ class BBoxHead(tf.keras.Model):
         refined_rois = transforms.delta2bbox(rois, deltas_specific, self.target_means, self.target_stds)
         
         # Clip boxes to image window
-        refined_rois *= tf.constant([H, W, H, W], dtype=tf.float32)
-        window = tf.constant([0., 0., H * 1., W * 1.], dtype=tf.float32)
+        #refined_rois *= tf.constant([H, W, H, W], dtype=tf.float32)
+        #window = tf.constant([0., 0., H * 1., W * 1.], dtype=tf.float32)
+        refined_rois *= tf.cast(tf.stack([H, W, H, W]), tf.float32)
+        window = tf.stack([0., 0., H * 1., W * 1.])
         refined_rois = transforms.bbox_clip(refined_rois, window)
         
         

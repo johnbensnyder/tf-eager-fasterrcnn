@@ -18,9 +18,43 @@ class AnchorGenerator(object):
         self.scales = scales
         self.ratios = ratios
         self.feature_strides = feature_strides
-     
+        self.anchors = tf.stop_gradient(self.generate_anchors((1216, 1216)))
+        
+    def generate_anchors(self, pad_shape):
+        feature_shapes = [(pad_shape[0] // stride, pad_shape[1] // stride)
+                          for stride in self.feature_strides]
+        anchors = [
+            self._generate_level_anchors(level, feature_shape)
+            for level, feature_shape in enumerate(feature_shapes)
+        ]
+        
+        anchors = tf.concat(anchors, axis=0)
+        return anchors
+    
+    def generate_pyramid_anchors(self, img_meta):
+        
+        pad_shape = tf.reduce_max(img_meta[..., 6:8], axis=0)
+        img_shapes = img_meta[..., 3:5]
+        
+        pad_shape = tf.reduce_max(img_meta[..., 6:8], axis=0)
+        img_shapes = img_meta[..., 3:5]
+        y_center = (self.anchors[:, 2] + self.anchors[:, 0]) / 2
+        x_center = (self.anchors[:, 3] + self.anchors[:, 1]) / 2
+        y_center = tf.transpose(tf.tile(tf.expand_dims(y_center, axis=0), [tf.shape(img_shapes)[0], tf.constant(1)]))
+        x_center = tf.transpose(tf.tile(tf.expand_dims(x_center, axis=0), [tf.shape(img_shapes)[0], tf.constant(1)]))
+        valid_flags = tf.ones((tf.shape(self.anchors)[0], tf.shape(img_shapes)[0]), dtype=tf.int32)
+        zeros = tf.zeros((tf.shape(self.anchors)[0], tf.shape(img_shapes)[0]), dtype=tf.int32)
+        valid_flags = tf.where(y_center<=img_shapes[...,0], valid_flags, zeros)
+        valid_flags = tf.where(x_center<=img_shapes[...,1], valid_flags, zeros)
+        valid_flags = tf.transpose(valid_flags)
+        
+        
+        valid_flags = tf.stop_gradient(valid_flags)
+        
+        return self.anchors, valid_flags
+    ''' 
     def generate_pyramid_anchors(self, img_metas):
-        '''Generate the multi-level anchors for Region Proposal Network
+        ''''''Generate the multi-level anchors for Region Proposal Network
         
         Args
         ---
@@ -30,7 +64,7 @@ class AnchorGenerator(object):
         ---
             anchors: [num_anchors, (y1, x1, y2, x2)] in image coordinates.
             valid_flags: [batch_size, num_anchors]
-        '''
+        ''''''
         # generate anchors
         pad_shape = calc_batch_padded_shape(img_metas)
         
@@ -43,10 +77,11 @@ class AnchorGenerator(object):
         anchors = tf.concat(anchors, axis=0)
 
         # generate valid flags
-        img_shapes = calc_img_shapes(img_metas)
+        #img_shapes = calc_img_shapes(img_metas)
+        img_shapes = img_metas[..., 3:5]
         valid_flags = [
             self._generate_valid_flags(anchors, img_shapes[i])
-            for i in range(img_shapes.shape[0])
+            for i in range(tf.shape(img_shapes)[0])
         ]
         valid_flags = tf.stack(valid_flags, axis=0)
         
@@ -56,7 +91,7 @@ class AnchorGenerator(object):
         return anchors, valid_flags
     
     def _generate_valid_flags(self, anchors, img_shape):
-        '''
+        ''''''
         Args
         ---
             anchors: [num_anchors, (y1, x1, y2, x2)] in image coordinates.
@@ -65,17 +100,17 @@ class AnchorGenerator(object):
         Returns
         ---
             valid_flags: [num_anchors]
-        '''
+        ''''''
         y_center = (anchors[:, 2] + anchors[:, 0]) / 2
         x_center = (anchors[:, 3] + anchors[:, 1]) / 2
         
-        valid_flags = tf.ones(anchors.shape[0], dtype=tf.int32)
-        zeros = tf.zeros(anchors.shape[0], dtype=tf.int32)
+        valid_flags = tf.ones(tf.shape(anchors)[0], dtype=tf.int32)
+        zeros = tf.zeros(tf.shape(anchors)[0], dtype=tf.int32)
         
         valid_flags = tf.where(y_center <= img_shape[0], valid_flags, zeros)
         valid_flags = tf.where(x_center <= img_shape[1], valid_flags, zeros)
         
-        return valid_flags
+        return valid_flags'''
     
     def _generate_level_anchors(self, level, feature_shape):
         '''Generate the anchors given the spatial shape of feature map.

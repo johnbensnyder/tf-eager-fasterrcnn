@@ -24,7 +24,9 @@ class RPNTestMixin(object):
         
         proposals = self.rpn_head.get_proposals(
             rpn_probs, rpn_deltas, img_metas, with_probs=False)
-
+        
+        #proposals = tf.reshape(proposals, [-1, 5])
+        
         return proposals
     
 class BBoxTestMixin(object):

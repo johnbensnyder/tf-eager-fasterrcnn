@@ -30,131 +30,135 @@ class AnchorTarget(object):
         self.pos_iou_thr = pos_iou_thr
         self.neg_iou_thr = neg_iou_thr
         self.batch_size = batch_size
-
-    def build_targets(self, anchors, valid_flags, gt_boxes, gt_class_ids):
-        '''Given the anchors and GT boxes, compute overlaps and identify positive
-        anchors and deltas to refine them to match their corresponding GT boxes.
-
-        Args
-        ---
-            anchors: [num_anchors, (y1, x1, y2, x2)] in image coordinates.
-            valid_flags: [batch_size, num_anchors]
-            gt_boxes: [batch_size, num_gt_boxes, (y1, x1, y2, x2)] in image 
-                coordinates.
-            gt_class_ids: [batch_size, num_gt_boxes] Integer class IDs.
-
-        Returns
-        ---
-            rpn_target_matchs: [batch_size, num_anchors] matches between anchors and GT boxes.
-                1 = positive anchor, -1 = negative anchor, 0 = neutral anchor
-            rpn_target_deltas: [batch_size, num_rpn_deltas, (dy, dx, log(dh), log(dw))] 
-                Anchor bbox deltas.
+   
+    def compute_argmax(self, ious):
         '''
-        rpn_target_matchs = []
-        rpn_target_deltas = []
-        
-        num_imgs = gt_class_ids.shape[0]
-        for i in range(num_imgs):
-            target_match, target_delta = self._build_single_target(
-                anchors, valid_flags[i], gt_boxes[i], gt_class_ids[i])
-            rpn_target_matchs.append(target_match)
-            rpn_target_deltas.append(target_delta)
-        
-        rpn_target_matchs = tf.stack(rpn_target_matchs)
-        rpn_target_deltas = tf.stack(rpn_target_deltas)
-        
-        rpn_target_matchs = tf.stop_gradient(rpn_target_matchs)
-        rpn_target_deltas = tf.stop_gradient(rpn_target_deltas)
-        
-        return rpn_target_matchs, rpn_target_deltas
-
-    def _build_single_target(self, anchors, valid_flags, gt_boxes, gt_class_ids):
-        '''Compute targets per instance.
-        
-        Args
-        ---
-            anchors: [num_anchors, (y1, x1, y2, x2)]
-            valid_flags: [num_anchors]
-            gt_class_ids: [num_gt_boxes]
-            gt_boxes: [num_gt_boxes, (y1, x1, y2, x2)]
-        
-        Returns
-        ---
-            target_matchs: [num_anchors]
-            target_deltas: [num_rpn_deltas, (dy, dx, log(dh), log(dw))] 
+        Need to compute max overlap with gt for each anchor
+        BUT also prioritize gt max values, so overright
+        argmax with new gt label if that gt needs it
         '''
-        gt_boxes, _ = trim_zeros(gt_boxes)
-        
-        target_matchs = tf.zeros(anchors.shape[0], dtype=tf.int32)
-        
-        # Compute overlaps [num_anchors, num_gt_boxes]
-        overlaps = geometry.compute_overlaps(anchors, gt_boxes)
-
-        # Match anchors to GT Boxes
-        # If an anchor overlaps a GT box with IoU >= 0.7 then it's positive.
-        # If an anchor overlaps a GT box with IoU < 0.3 then it's negative.
-        # Neutral anchors are those that don't match the conditions above,
-        # and they don't influence the loss function.
-        # However, don't keep any GT box unmatched (rare, but happens). Instead,
-        # match it to the closest anchor (even if its max IoU is < 0.3).
-        
-        neg_values = tf.constant([0, -1])
-        pos_values = tf.constant([0, 1])
-        
-        # 1. Set negative anchors first. They get overwritten below if a GT box is
-        # matched to them.
-        anchor_iou_argmax = tf.argmax(overlaps, axis=1)
-        #anchor_iou_max = tf.reduce_max(overlaps, reduction_indices=[1])
-        anchor_iou_max = tf.reduce_max(overlaps, axis=[1])
-        
-        target_matchs = tf.where(anchor_iou_max < self.neg_iou_thr, 
-                                 -tf.ones(anchors.shape[0], dtype=tf.int32), target_matchs)
-
-        # filter invalid anchors
-        target_matchs = tf.where(tf.equal(valid_flags, 1), 
-                                 target_matchs, tf.zeros(anchors.shape[0], dtype=tf.int32))
-
-        # 2. Set anchors with high overlap as positive.
-        target_matchs = tf.where(anchor_iou_max >= self.pos_iou_thr, 
-                                 tf.ones(anchors.shape[0], dtype=tf.int32), target_matchs)
-
-        # 3. Set an anchor for each GT box (regardless of IoU value).        
-        gt_iou_argmax = tf.argmax(overlaps, axis=0)
-        target_matchs = tf.compat.v1.scatter_update(tf.Variable(target_matchs), gt_iou_argmax, 1)
-        
-        
-        # Subsample to balance positive and negative anchors
-        # Don't let positives be more than half the anchors
-        ids = tf.where(tf.equal(target_matchs, 1))
-        ids = tf.squeeze(ids, 1)
-        extra = ids.shape.as_list()[0] - int(self.num_rpn_deltas * self.positive_fraction)
-        if extra > 0:
-            # Reset the extra ones to neutral
-            ids = tf.random_shuffle(ids)[:extra]
-            target_matchs = tf.compat.v1.scatter_update(target_matchs, ids, 0)
-        # Same for negative proposals
-        ids = tf.where(tf.equal(target_matchs, -1))
-        ids = tf.squeeze(ids, 1)
-        extra = ids.shape.as_list()[0] - (self.num_rpn_deltas -
-            tf.reduce_sum(tf.cast(tf.equal(target_matchs, 1), tf.int32)))
-        if extra > 0:
-            # Rest the extra ones to neutral
-            ids = tf.random.shuffle(ids)[:extra]
-            target_matchs = tf.compat.v1.scatter_update(target_matchs, ids, 0)
-
-        
-        # For positive anchors, compute shift and scale needed to transform them
-        # to match the corresponding GT boxes.
-        ids = tf.where(tf.equal(target_matchs, 1))
-        
-        a = tf.gather_nd(anchors, ids)
-        anchor_idx = tf.gather_nd(anchor_iou_argmax, ids)
-        gt = tf.gather(gt_boxes, anchor_idx)
-        
-        target_deltas = transforms.bbox2delta(
-            a, gt, self.target_means, self.target_stds)
-        
-        padding = tf.maximum(self.num_rpn_deltas - tf.shape(target_deltas)[0], 0)
-        target_deltas = tf.pad(target_deltas, [(0, padding), (0, 0)])
-
-        return target_matchs, target_deltas
+        anchor_iou_argmax = tf.argmax(ious, axis=2)
+        gt_iou_argmax = tf.argmax(ious, axis=1)
+        #default_values = tf.tile(tf.expand_dims(tf.gather_nd(anchor_iou_argmax, 
+        #                   tf.concat([tf.expand_dims(tf.repeat(0, tf.shape(ious)[0]), axis=1),
+        #                        tf.expand_dims(tf.range(tf.shape(ious)[0]), axis=1)], axis=1)), axis=1), [1, tf.shape(ious)[2]])
+        fill_values = tf.where(gt_iou_argmax!=0)[..., 1]
+        positions = tf.transpose(tf.stack([tf.where(gt_iou_argmax!=0)[..., 0], 
+                                       tf.gather_nd(gt_iou_argmax, tf.where(gt_iou_argmax!=0)),
+                                       fill_values]))
+        positions = tf.boolean_mask(positions, tf.gather_nd(ious, positions)<self.pos_iou_thr)
+        fill_values = positions[...,2]
+        positions = positions[...,:2]
+        anchor_iou_argmax = tf.tensor_scatter_nd_update(anchor_iou_argmax, positions, fill_values)
+        return anchor_iou_argmax
+    
+    def fill_missing_gts(self, target_matches, ious):
+        '''
+        For gts that didn't get a box assignment,
+        assign the highest overlap
+        '''
+        '''gt_iou_argmax = tf.argmax(ious, axis=1, output_type=tf.int32)
+        default_values = tf.tile(tf.expand_dims(tf.gather_nd(target_matches, 
+                           tf.concat([tf.expand_dims(tf.repeat(0, tf.shape(ious)[0]), axis=1),
+                                tf.expand_dims(tf.range(tf.shape(ious)[0]), axis=1)], axis=1)), axis=1), [1, tf.shape(ious)[2]])
+        fill_values = tf.reshape(tf.where(gt_iou_argmax!=0, tf.ones(tf.shape(gt_iou_argmax), dtype=tf.int32) , default_values), [-1])
+        position_values = tf.expand_dims(tf.reshape(tf.tile(tf.expand_dims(tf.range(tf.shape(ious)[0]), axis=1), [1, tf.shape(ious)[2]]), [-1]), axis=1)
+        gt_positions = tf.expand_dims(tf.reshape(gt_iou_argmax, [-1]), axis=1)
+        gt_positions = tf.concat([position_values, gt_positions], axis=1)
+        target_matches = tf.tensor_scatter_nd_update(target_matches, gt_positions, fill_values)'''
+        gt_iou_argmax = tf.argmax(ious, axis=1)
+        positions = tf.where(gt_iou_argmax!=0)
+        gt_positions = tf.gather_nd(gt_iou_argmax, positions)
+        gt_positions = tf.transpose(tf.stack([positions[...,0], gt_positions]))
+        fill_values = tf.ones(tf.shape(gt_positions)[0], dtype=tf.int32)
+        target_matches = tf.tensor_scatter_nd_update(target_matches, gt_positions, fill_values)
+        return target_matches
+    
+    def subset_targets(self, target_matches):
+        pos_ids = tf.where(tf.equal(target_matches, 1))
+        pos_ids = tf.gather(pos_ids, 
+                 tf.concat([tf.sort(tf.random.shuffle(tf.reshape(tf.where(pos_ids[...,0]==i), 
+                                        [-1]))[:self.num_rpn_deltas]) for i in range(self.batch_size)], axis=0))
+        neg_ids = tf.where(tf.equal(target_matches, -1))
+        neg_ids = tf.gather(neg_ids, 
+                  tf.concat([tf.random.shuffle(tf.reshape(tf.where(neg_ids[...,0]==i), [-1])) \
+                                                [:tf.math.minimum(tf.shape(tf.where(pos_ids[...,0]==i))[0]*5,
+                                                                  self.num_rpn_deltas)] \
+                             for i in range(self.batch_size)], axis=0))
+        '''neg_ids = tf.gather(neg_ids, 
+                  tf.concat([tf.random.shuffle(tf.reshape(tf.where(neg_ids[...,0]==i), [-1])) \
+                                                [:self.num_rpn_deltas] \
+                             for i in range(self.batch_size)], axis=0))'''
+        target_matches = tf.zeros(tf.shape(target_matches), dtype=tf.int32)
+        target_matches = tf.tensor_scatter_nd_update(target_matches, pos_ids, tf.ones(tf.shape(pos_ids)[0], dtype=tf.int32))
+        target_matches = tf.tensor_scatter_nd_update(target_matches, neg_ids, -tf.ones(tf.shape(neg_ids)[0], dtype=tf.int32))
+        return pos_ids, neg_ids, target_matches
+    
+    def batch_iou(self, anchors, bboxes):
+        # replace this line, reshape anchors outside
+        anchors = tf.tile(tf.expand_dims(anchors, axis=0), [tf.shape(bboxes)[0], 1, 1])
+        y1_min, x1_min, y1_max, x1_max = tf.split(
+            value=anchors, num_or_size_splits=4, axis=2)
+        y2_min, x2_min, y2_max, x2_max = tf.split(
+            value=bboxes, num_or_size_splits=4, axis=2)
+        intersection_xmin = tf.maximum(x1_min, tf.transpose(x2_min, [0, 2, 1]))
+        intersection_xmax = tf.minimum(x1_max, tf.transpose(x2_max, [0, 2, 1]))
+        intersection_ymin = tf.maximum(y1_min, tf.transpose(y2_min, [0, 2, 1]))
+        intersection_ymax = tf.minimum(y1_max, tf.transpose(y2_max, [0, 2, 1]))
+        intersection_area = tf.maximum(
+            (intersection_xmax - intersection_xmin), 0) * tf.maximum(
+                (intersection_ymax - intersection_ymin), 0)
+        area1 = (y1_max - y1_min) * (x1_max - x1_min)
+        area2 = (y2_max - y2_min) * (x2_max - x2_min)
+        union_area = area1 + tf.transpose(area2, [0, 2, 1]) - intersection_area + 1e-8
+        iou = intersection_area / union_area
+        padding_mask = tf.logical_and(tf.less(intersection_xmax, 0), tf.less(intersection_ymax, 0))
+        iou = tf.where(padding_mask, -tf.ones_like(iou), iou)
+        return iou
+    
+    #@tf.function
+    def get_counts(self, anchor_idx, batch_size):
+        per_image_count = tf.unique_with_counts(anchor_idx[...,0], out_idx=tf.int64)[2]
+        count = tf.cast(tf.math.cumsum(tf.ones(tf.shape(anchor_idx)[0])), tf.int64)
+        counts = tf.concat([tf.constant([0], dtype=tf.int64), count], axis=0)
+        target_deltas_counts = tf.concat([counts[:per_image_count[i]] for i in range(batch_size)], axis=-1)
+        return target_deltas_counts
+    
+    @tf.function(experimental_relax_shapes=True)
+    def pad_target_deltas(self, target_deltas, pos_ids):
+        reshaped_images = tf.TensorArray(tf.float32, size=4)
+        max_deltas = tf.reduce_max(tf.unique_with_counts(pos_ids[...,0])[2])
+        for i in range(4):
+            image_gt = tf.gather_nd(target_deltas, tf.where(pos_ids[...,0]==i))
+            image_gt = tf.pad(image_gt, [[0,max_deltas-tf.shape(image_gt)[0]], [0,0]])
+            reshaped_images = reshaped_images.write(i, image_gt)
+        return reshaped_images.stack()
+    
+    def build_targets(self, anchors, valid_flags, bboxes, labels):
+        batch_size = tf.shape(bboxes)[0]
+        anchor_size = tf.shape(anchors)[0]
+        ious = self.batch_iou(anchors, bboxes)
+        anchor_iou_argmax = self.compute_argmax(ious)
+        anchor_iou_max = tf.reduce_max(ious, axis=2)
+        target_matches = tf.zeros((batch_size, anchor_size), dtype=tf.int32)
+        # get negative values
+        target_matches = tf.where(anchor_iou_max < self.neg_iou_thr, 
+                                -tf.ones((batch_size, anchor_size), dtype=tf.int32), target_matches)
+        # filter invalid flags
+        target_matches = tf.where(tf.equal(valid_flags, 1),
+                                         target_matches, tf.zeros((batch_size, anchor_size), dtype=tf.int32))
+        # get pos anchors
+        target_matches = tf.where(anchor_iou_max >= self.pos_iou_thr, 
+                                  tf.ones((batch_size, anchor_size), dtype=tf.int32), target_matches)
+        # fill in missing gt values
+        target_matches = self.fill_missing_gts(target_matches, ious)
+        pos_ids, neg_ids, target_matches = self.subset_targets(target_matches)
+        a = tf.gather_nd(tf.tile(tf.expand_dims(anchors, axis=0), [batch_size, 1, 1]), pos_ids)
+        anchor_idx = tf.gather_nd(anchor_iou_argmax, pos_ids)
+        anchor_idx = tf.transpose(tf.stack([pos_ids[...,0], anchor_idx]))
+        gt = tf.gather_nd(bboxes, anchor_idx)
+        target_deltas = transforms.bbox2delta(a, gt, self.target_means, self.target_stds)
+        # reshape to batch
+        target_deltas = self.pad_target_deltas(target_deltas, pos_ids)
+        return target_matches, target_deltas
+    
