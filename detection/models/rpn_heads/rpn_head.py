@@ -20,6 +20,7 @@ class RPNHead(tf.keras.Model):
                  positive_fraction=0.5,
                  pos_iou_thr=0.7,
                  neg_iou_thr=0.3,
+                 batch_size=1,
                  **kwags):
         '''Network head of Region Proposal Network.
 
@@ -50,6 +51,7 @@ class RPNHead(tf.keras.Model):
         self.nms_threshold = nms_threshold
         self.target_means = target_means
         self.target_stds = target_stds
+        self.batch_size = batch_size
 
         self.generator = anchor_generator.AnchorGenerator(
             scales=anchor_scales, 
@@ -62,7 +64,8 @@ class RPNHead(tf.keras.Model):
             num_rpn_deltas=num_rpn_deltas,
             positive_fraction=positive_fraction,
             pos_iou_thr=pos_iou_thr,
-            neg_iou_thr=neg_iou_thr)
+            neg_iou_thr=neg_iou_thr,
+            batch_size=self.batch_size)
         
         self.rpn_class_loss = losses.rpn_class_loss
         self.rpn_bbox_loss = losses.rpn_bbox_loss
@@ -162,7 +165,7 @@ class RPNHead(tf.keras.Model):
         proposals_list = [
             self._get_proposals_single(
                 rpn_probs[i], rpn_deltas[i], anchors, valid_flags[i], pad_shapes[i], i, with_probs)
-            for i in range(img_metas.shape[0])
+            for i in range(self.batch_size) #for i in range(tf.shape(img_metas)[0])
         ]
         
         return tf.concat(proposals_list, axis=0)
@@ -194,7 +197,8 @@ class RPNHead(tf.keras.Model):
                 coordinates.
         '''
         
-        H, W = img_shape
+        H = tf.cast(img_shape[0], tf.float32)
+        W = tf.cast(img_shape[1], tf.float32)
         
         # filter invalid anchors
         valid_flags = tf.cast(valid_flags, tf.bool)
@@ -204,7 +208,7 @@ class RPNHead(tf.keras.Model):
         anchors = tf.boolean_mask(anchors, valid_flags)
 
         # Improve performance
-        pre_nms_limit = min(6000, anchors.shape[0])
+        pre_nms_limit = tf.math.minimum(6000, tf.shape(anchors)[0])
         ix = tf.nn.top_k(rpn_probs, pre_nms_limit, sorted=True).indices
         
         rpn_probs = tf.gather(rpn_probs, ix)
@@ -215,11 +219,13 @@ class RPNHead(tf.keras.Model):
         proposals = transforms.delta2bbox(anchors, rpn_deltas, 
                                           self.target_means, self.target_stds)
         
-        window = tf.constant([0., 0., H, W], dtype=tf.float32)
+        # window = tf.constant([0., 0., H, W], dtype=tf.float32)
+        window = tf.stack([0., 0., H, W])
         proposals = transforms.bbox_clip(proposals, window)
         
         # Normalize
-        proposals = proposals / tf.constant([H, W, H, W], dtype=tf.float32)
+        # proposals = proposals / tf.constant([H, W, H, W], dtype=tf.float32)
+        proposals = proposals / tf.stack([H, W, H, W])
         
         # NMS
         indices = tf.image.non_max_suppression(
@@ -234,7 +240,7 @@ class RPNHead(tf.keras.Model):
         padding = tf.maximum(self.proposal_count - tf.shape(proposals)[0], 0)
         proposals = tf.pad(proposals, [(0, padding), (0, 0)])
         
-        batch_inds = tf.ones((proposals.shape[0], 1)) * batch_ind
+        batch_inds = tf.ones((tf.shape(proposals)[0], 1)) * batch_ind
         proposals = tf.concat([batch_inds, proposals], axis=1)
         
         return proposals

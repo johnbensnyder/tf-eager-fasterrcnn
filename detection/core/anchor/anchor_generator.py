@@ -4,9 +4,9 @@ from detection.utils.misc import *
 
 class AnchorGenerator(object):
     def __init__(self, 
-                 scales=(32, 64, 128, 256, 512), 
+                 scales=(32, 64, 128, 256, 512, 1024), 
                  ratios=(0.5, 1, 2), 
-                 feature_strides=(4, 8, 16, 32, 64)):
+                 feature_strides=(4, 8, 16, 32, 64, 128)):
         '''Anchor Generator
         
         Attributes
