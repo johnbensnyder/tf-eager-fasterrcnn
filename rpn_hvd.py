@@ -30,11 +30,11 @@ train_dataset = coco.CocoDataSet('/workspace/shared_workspace/data/coco', 'train
                                  std=img_std,
                                  scale=(800, 1216))
 
-train_generator = data_generator.DataGenerator(train_dataset)
+train_generator = data_generator.DataGenerator(train_dataset, shuffle=True)
 train_tf_dataset = tf.data.Dataset.from_generator(
     train_generator, (tf.float32, tf.float32, tf.float32, tf.int32))
 batch_size = 4
-train_tf_dataset = train_tf_dataset.prefetch(100).shuffle(100).shard(hvd.size(), hvd.rank())
+train_tf_dataset = train_tf_dataset.prefetch(128) #.shuffle(100).shard(hvd.size(), hvd.rank())
 train_tf_dataset = train_tf_dataset.padded_batch(
                             batch_size,
                             padded_shapes=(
@@ -66,7 +66,7 @@ def train_step(inputs):
     with tf.GradientTape() as tape:
         rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = \
             model((batch_imgs, batch_metas, batch_bboxes, batch_labels), training=True)
-        loss_value = rpn_class_loss + rpn_bbox_loss # + rcnn_class_loss + rcnn_bbox_loss
+        loss_value = rpn_class_loss + rpn_bbox_loss + rcnn_class_loss + rcnn_bbox_loss
         scaled_loss = optimizer.get_scaled_loss(loss_value)
     tape = hvd.DistributedGradientTape(tape)
     scaled_grads = tape.gradient(scaled_loss, model.trainable_variables)
@@ -74,22 +74,30 @@ def train_step(inputs):
     grads = optimizer.get_unscaled_gradients(scaled_grads)
     grads = [grad if grad is not None else tf.zeros_like(var) for var, grad in zip(model.trainable_variables, grads)]
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
-    return rpn_class_loss, rpn_bbox_loss
+    return rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss
 
-epochs = 10
+epochs = 4
 for epoch in range(epochs):
     rpn_class_loss_history = []
     rpn_bbox_loss_history = []
+    rcnn_class_loss_history = []
+    rcnn_bbox_loss_history = []
     if hvd.rank()==0:
         progressbar = tqdm(enumerate(train_tf_dataset))
         for (batch, inputs) in progressbar:
-            rpn_class_loss, rpn_bbox_loss = train_step(inputs)
+            rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = train_step(inputs)
             rpn_class_loss_history.append(rpn_class_loss)
             rpn_bbox_loss_history.append(rpn_bbox_loss)
-            progressbar.set_description("class: {0:.5f} box {1:.5f}".format(np.array(rpn_class_loss_history[-100:]).mean(),
-                                                                            np.array(rpn_bbox_loss_history[-100:]).mean()))
+            rcnn_class_loss_history.append(rcnn_class_loss)
+            rcnn_bbox_loss_history.append(rcnn_bbox_loss)
+            progressbar.set_description("rpnc: {0:.5f} rpnb {1:.5f} rcnc {2:.5f} rcnb {3:.5f}". \
+                                        format(np.array(rpn_class_loss_history[-100:]).mean(),
+                                        np.array(rpn_bbox_loss_history[-100:]).mean(),
+                                        np.array(rcnn_class_loss_history[-100:]).mean(),
+                                        np.array(rcnn_bbox_loss_history[-100:]).mean()))
+                                        
         model.save_weights("rpn_training_epoch_{}.h5".format(epoch+1))
     else:
         for (batch, inputs) in enumerate(train_tf_dataset):
-            rpn_class_loss, rpn_bbox_loss = train_step(inputs)
+            rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = train_step(inputs)
 
