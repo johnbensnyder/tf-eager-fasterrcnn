@@ -62,7 +62,7 @@ def flip_channels(img, img_meta, bbox, label):
 train_tf_dataset = iter(train_tf_dataset.repeat())
 
 model = faster_rcnn.FasterRCNN(
-    num_classes=len(train_dataset.get_categories()))
+    num_classes=len(train_dataset.get_categories()), batch_size=batch_size)
 
 for i in train_tf_dataset:
     _ = model(i)
@@ -71,22 +71,22 @@ for i in train_tf_dataset:
 #model.layers[0].load_weights('resnet_101_backbone.h5')
 '''for layer in model.layers[0].layers[0].layers[:142]:
     layer.trainable=False'''
-model.layers[0].trainable=False
+#model.layers[0].trainable=False
 #model.layers[4].trainable=False
-#model.load_weights('rcnn50_training_epoch_2.h5')
-
+model.layers[0].load_weights('resnet_101_backbone.h5')
+model.layers[0].trainable=False
 '''for layer in model.layers[143:]:
     if type(layer)!=BatchNormalization:
         layer.trainable=True'''
 
-scheduler = schedulers.WarmupExponentialDecay(1e-3, 1e-2, steps_per_epoch,
+scheduler = schedulers.WarmupExponentialDecay(1e-4, 1e-3, steps_per_epoch,
                                               1e-4, steps_per_epoch*12)
 #scheduler = tf.keras.optimizers.schedules.PiecewiseConstantDecay([steps_per_epoch*5],
 #                                                                 [1e-3, 1e-4])
 #optimizer = tf.keras.optimizers.SGD(1e-3, momentum=0.9, nesterov=True, clipnorm=5.0)
 #optimizer = tf.keras.optimizers.SGD(1e-3, momentum=0.9, nesterov=True)
-#optimizer = tfa.optimizers.SGDW(1e-4, 1e-4, momentum=0.9, nesterov=True)
-optimizer = tfa.optimizers.AdamW(1e-4, scheduler)
+optimizer = tfa.optimizers.SGDW(1e-4, scheduler, momentum=0.9, nesterov=True)
+#optimizer = tfa.optimizers.AdamW(1e-4, scheduler)
 optimizer = tf.keras.mixed_precision.experimental.LossScaleOptimizer(optimizer, "dynamic")
 
 @tf.function(experimental_relax_shapes=True)
@@ -114,13 +114,13 @@ total_epochs = 1
 epochs = 3
 for epoch in range(epochs):
     rpn_class_loss_history = 0
-    rpn_class_loss_count=0
+    rpn_class_loss_count=1
     rpn_bbox_loss_history = 0
-    rpn_bbox_loss_count=0
+    rpn_bbox_loss_count=1
     rcnn_class_loss_history = 0
-    rcnn_class_loss_count=0
+    rcnn_class_loss_count=1
     rcnn_bbox_loss_history = 0
-    rcnn_bbox_loss_count=0
+    rcnn_bbox_loss_count=1
     if hvd.rank()==0:
         progressbar = tqdm(range(steps_per_epoch))
         for batch in progressbar:
@@ -132,10 +132,10 @@ for epoch in range(epochs):
             if not np.isnan(rpn_bbox_loss.numpy()):
                 rpn_bbox_loss_history += rpn_bbox_loss.numpy()
                 rpn_bbox_loss_count+=1
-            if not np.isnan(rcnn_class_loss.numpy()):
+            if not np.isnan(rcnn_class_loss.numpy()) and rcnn_class_loss.numpy()!=0:
                 rcnn_class_loss_history += rcnn_class_loss.numpy()
                 rcnn_class_loss_count+=1
-            if not np.isnan(rcnn_bbox_loss.numpy()):
+            if not np.isnan(rcnn_bbox_loss.numpy()) and rcnn_bbox_loss.numpy()!=0:
                 rcnn_bbox_loss_history += rcnn_bbox_loss.numpy()
                 rcnn_bbox_loss_count+=1
             progressbar.set_description("rpnc: {0:.5f} rpnb {1:.5f} rcnc {2:.5f} rcnb {3:.5f}". \
@@ -144,7 +144,7 @@ for epoch in range(epochs):
                                         rcnn_class_loss_history/rcnn_class_loss_count,
                                         rcnn_bbox_loss_history/rcnn_bbox_loss_count))
                                         
-        model.save_weights("rcnn50_adam_training_epoch_{}.h5".format(total_epochs))
+        model.save_weights("rcnn101_sgdw_training_epoch_{}.h5".format(total_epochs))
         total_epochs+=1
     else:
         for batch in range(steps_per_epoch):
@@ -158,13 +158,13 @@ for layer in model.layers[0].layers[0].layers[142:]:
 epochs = 5
 for epoch in range(epochs):
     rpn_class_loss_history = 0
-    rpn_class_loss_count=0
+    rpn_class_loss_count=1
     rpn_bbox_loss_history = 0
-    rpn_bbox_loss_count=0
+    rpn_bbox_loss_count=1
     rcnn_class_loss_history = 0
-    rcnn_class_loss_count=0
+    rcnn_class_loss_count=1
     rcnn_bbox_loss_history = 0
-    rcnn_bbox_loss_count=0
+    rcnn_bbox_loss_count=1
     if hvd.rank()==0:
         progressbar = tqdm(range(steps_per_epoch))
         for batch in progressbar:
@@ -176,10 +176,10 @@ for epoch in range(epochs):
             if not np.isnan(rpn_bbox_loss.numpy()):
                 rpn_bbox_loss_history += rpn_bbox_loss.numpy()
                 rpn_bbox_loss_count+=1
-            if not np.isnan(rcnn_class_loss.numpy()):
+            if not np.isnan(rcnn_class_loss.numpy()) and rcnn_class_loss.numpy()!=0:
                 rcnn_class_loss_history += rcnn_class_loss.numpy()
                 rcnn_class_loss_count+=1
-            if not np.isnan(rcnn_bbox_loss.numpy()):
+            if not np.isnan(rcnn_bbox_loss.numpy()) and rcnn_bbox_loss.numpy()!=0:
                 rcnn_bbox_loss_history += rcnn_bbox_loss.numpy()
                 rcnn_bbox_loss_count+=1
             progressbar.set_description("rpnc: {0:.5f} rpnb {1:.5f} rcnc {2:.5f} rcnb {3:.5f}". \
@@ -202,13 +202,13 @@ for layer in model.layers[0].layers[0].layers[80:]:
 epochs = 4
 for epoch in range(epochs):
     rpn_class_loss_history = 0
-    rpn_class_loss_count=0
+    rpn_class_loss_count=1
     rpn_bbox_loss_history = 0
-    rpn_bbox_loss_count=0
+    rpn_bbox_loss_count=1
     rcnn_class_loss_history = 0
-    rcnn_class_loss_count=0
+    rcnn_class_loss_count=1
     rcnn_bbox_loss_history = 0
-    rcnn_bbox_loss_count=0
+    rcnn_bbox_loss_count=1
     if hvd.rank()==0:
         progressbar = tqdm(range(steps_per_epoch))
         for batch in progressbar:
@@ -220,10 +220,10 @@ for epoch in range(epochs):
             if not np.isnan(rpn_bbox_loss.numpy()):
                 rpn_bbox_loss_history += rpn_bbox_loss.numpy()
                 rpn_bbox_loss_count+=1
-            if not np.isnan(rcnn_class_loss.numpy()):
+            if not np.isnan(rcnn_class_loss.numpy()) and rcnn_class_loss.numpy()!=0:
                 rcnn_class_loss_history += rcnn_class_loss.numpy()
                 rcnn_class_loss_count+=1
-            if not np.isnan(rcnn_bbox_loss.numpy()):
+            if not np.isnan(rcnn_bbox_loss.numpy()) and rcnn_bbox_loss.numpy()!=0:
                 rcnn_bbox_loss_history += rcnn_bbox_loss.numpy()
                 rcnn_bbox_loss_count+=1
             progressbar.set_description("rpnc: {0:.5f} rpnb {1:.5f} rcnc {2:.5f} rcnb {3:.5f}". \

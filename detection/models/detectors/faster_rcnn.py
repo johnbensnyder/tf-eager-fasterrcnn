@@ -64,11 +64,11 @@ class FasterRCNN(tf.keras.Model, RPNTestMixin, BBoxTestMixin):
             neg_iou_thr=self.RCNN_NEG_IOU_THR)
                 
         # Modules
-        '''self.backbone = resnet.ResNet(depth=101, 
-            name='res_net')'''
-        self.backbone = keras_resnet.ResNet(
-            depth=50, 
+        self.backbone = resnet.ResNet(depth=101, 
             name='res_net')
+        '''self.backbone = keras_resnet.ResNet(
+            depth=50, 
+            name='res_net')'''
         '''self.backbone = matterport_resnet. \
         build_resnet(weights_file = '/workspace/shared_workspace/mask_rcnn_coco_2.h5')'''
         
