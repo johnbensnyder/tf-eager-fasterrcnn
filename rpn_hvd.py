@@ -29,8 +29,8 @@ img_mean = (123.68, 116.779, 103.939)
 img_std = (1., 1., 1.)
 #img_std = (127.5, 127.5, 127.5)
 images = 118000
-batch_size = 4
-loss_weights = [4, 1, 2, 1]
+batch_size = 1
+loss_weights = [4, 1, 1, 1]
 steps_per_epoch = images//(batch_size*hvd.size())
 train_dataset = coco.CocoDataSet('/workspace/shared_workspace/data/coco', 'train',
                                  flip_ratio=0.5,
@@ -59,7 +59,7 @@ def flip_channels(img, img_meta, bbox, label):
     img = tf.reverse(img, axis=[-1])
     return img, img_meta, bbox, label
 
-train_tf_dataset = iter(train_tf_dataset.repeat())
+train_tf_dataset = iter(train_tf_dataset.map(flip_channels, num_parallel_calls=4).repeat())
 
 model = faster_rcnn.FasterRCNN(
     num_classes=len(train_dataset.get_categories()), batch_size=batch_size)
@@ -73,13 +73,13 @@ for i in train_tf_dataset:
     layer.trainable=False'''
 #model.layers[0].trainable=False
 #model.layers[4].trainable=False
-model.layers[0].load_weights('resnet_101_backbone.h5')
+#model.layers[0].load_weights('resnet_101_backbone.h5')
 model.layers[0].trainable=False
-'''for layer in model.layers[143:]:
+for layer in model.layers[0].layers[0].layers[80:]:
     if type(layer)!=BatchNormalization:
-        layer.trainable=True'''
+        layer.trainable=True
 
-scheduler = schedulers.WarmupExponentialDecay(1e-4, 1e-3, steps_per_epoch,
+scheduler = schedulers.WarmupExponentialDecay(1e-3, 1e-2, steps_per_epoch,
                                               1e-4, steps_per_epoch*12)
 #scheduler = tf.keras.optimizers.schedules.PiecewiseConstantDecay([steps_per_epoch*5],
 #                                                                 [1e-3, 1e-4])
@@ -98,8 +98,7 @@ def train_step(inputs):
         loss_value = (loss_weights[0] * rpn_class_loss \
                       + loss_weights[1] * rpn_bbox_loss \
                       + loss_weights[2] * rcnn_class_loss \
-                      + loss_weights[3] * rcnn_bbox_loss)/ \
-                      np.array(loss_weights).sum()
+                      + loss_weights[3] * rcnn_bbox_loss)
         #scaled_loss = optimizer.get_scaled_loss(loss_value)
     tape = hvd.DistributedGradientTape(tape)
     #scaled_grads = tape.gradient(scaled_loss, model.trainable_variables)
@@ -113,36 +112,24 @@ total_epochs = 1
 
 epochs = 3
 for epoch in range(epochs):
-    rpn_class_loss_history = 0
-    rpn_class_loss_count=1
-    rpn_bbox_loss_history = 0
-    rpn_bbox_loss_count=1
-    rcnn_class_loss_history = 0
-    rcnn_class_loss_count=1
-    rcnn_bbox_loss_history = 0
-    rcnn_bbox_loss_count=1
+    rpn_class_loss_history = []
+    rpn_bbox_loss_history = []
+    rcnn_class_loss_history = []
+    rcnn_bbox_loss_history = []
     if hvd.rank()==0:
         progressbar = tqdm(range(steps_per_epoch))
         for batch in progressbar:
             inputs = next(train_tf_dataset)
             rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = train_step(inputs)
-            if not np.isnan(rpn_class_loss.numpy()):
-                rpn_class_loss_history += rpn_class_loss.numpy()
-                rpn_class_loss_count+=1
-            if not np.isnan(rpn_bbox_loss.numpy()):
-                rpn_bbox_loss_history += rpn_bbox_loss.numpy()
-                rpn_bbox_loss_count+=1
-            if not np.isnan(rcnn_class_loss.numpy()) and rcnn_class_loss.numpy()!=0:
-                rcnn_class_loss_history += rcnn_class_loss.numpy()
-                rcnn_class_loss_count+=1
-            if not np.isnan(rcnn_bbox_loss.numpy()) and rcnn_bbox_loss.numpy()!=0:
-                rcnn_bbox_loss_history += rcnn_bbox_loss.numpy()
-                rcnn_bbox_loss_count+=1
+            rpn_class_loss_history.append(rpn_class_loss)
+            rpn_bbox_loss_history.append(rpn_bbox_loss)
+            rcnn_class_loss_history.append(rcnn_class_loss)
+            rcnn_bbox_loss_history.append(rcnn_bbox_loss)
             progressbar.set_description("rpnc: {0:.5f} rpnb {1:.5f} rcnc {2:.5f} rcnb {3:.5f}". \
-                                        format(rpn_class_loss_history/rpn_class_loss_count,
-                                        rpn_bbox_loss_history/rpn_bbox_loss_count,
-                                        rcnn_class_loss_history/rcnn_class_loss_count,
-                                        rcnn_bbox_loss_history/rcnn_bbox_loss_count))
+                                        format(np.array(rpn_class_loss_history[-200:]).mean(),
+                                        np.array(rpn_bbox_loss_history[-200:]).mean(),
+                                        np.array(rcnn_class_loss_history[-200:]).mean(),
+                                        np.array(rcnn_bbox_loss_history[-200:]).mean()))
                                         
         model.save_weights("rcnn101_sgdw_training_epoch_{}.h5".format(total_epochs))
         total_epochs+=1
