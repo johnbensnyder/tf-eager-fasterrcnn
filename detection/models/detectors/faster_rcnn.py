@@ -1,6 +1,6 @@
 import tensorflow as tf
 
-from detection.models.backbones import resnet
+from detection.models.backbones import resnet, keras_resnet, matterport_resnet
 from detection.models.necks import fpn
 from detection.models.rpn_heads import rpn_head
 from detection.models.bbox_heads import bbox_head
@@ -64,9 +64,13 @@ class FasterRCNN(tf.keras.Model, RPNTestMixin, BBoxTestMixin):
             neg_iou_thr=self.RCNN_NEG_IOU_THR)
                 
         # Modules
-        self.backbone = resnet.ResNet(
-            depth=101, 
+        '''self.backbone = resnet.ResNet(depth=101, 
+            name='res_net')'''
+        self.backbone = keras_resnet.ResNet(
+            depth=50, 
             name='res_net')
+        '''self.backbone = matterport_resnet. \
+        build_resnet(weights_file = '/workspace/shared_workspace/mask_rcnn_coco_2.h5')'''
         
         self.neck = fpn.FPN(
             name='fpn')
