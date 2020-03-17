@@ -15,13 +15,14 @@ from detection.utils import schedulers
 hvd.init()
 # mpirun -np 4 -H localhost:4 --bind-to none --allow-run-as-root python rpn_hvd.py
 #tf.config.optimizer.set_jit(True)
-tf.config.optimizer.set_experimental_options({"auto_mixed_precision": False})
+tf.config.optimizer.set_experimental_options({"auto_mixed_precision": True})
 
 gpus = tf.config.experimental.list_physical_devices('GPU')
 for gpu in gpus:
     tf.config.experimental.set_memory_growth(gpu, True)
 if gpus:
     tf.config.experimental.set_visible_devices(gpus[hvd.local_rank()], 'GPU')
+
 
 #img_mean = (123.675, 116.28, 103.53)
 img_mean = (123.68, 116.779, 103.939)
@@ -30,7 +31,10 @@ img_mean = (123.68, 116.779, 103.939)
 img_std = (1., 1., 1.)
 #img_std = (127.5, 127.5, 127.5)
 images = 118000
-batch_size = 6
+batch_size = 8
+learning_rate = batch_size*hvd.size()*5e-4
+warmup_rate = learning_rate/10
+warmup_steps = 2000
 loss_weights = [1, 1, 1, 1]
 steps_per_epoch = images//(batch_size*hvd.size())
 train_dataset = coco.CocoDataSet('/workspace/shared_workspace/data/coco', 'train',
@@ -50,8 +54,8 @@ train_tf_dataset = train_tf_dataset.padded_batch(
                             padded_shapes=(
                             tf.TensorShape([None, None, 3]), # image padded to largest in batch
                             tf.TensorShape([11]),            # image meta - no padding
-                            tf.TensorShape([100, 4]),       # bounding boxes, padded to longest
-                            tf.TensorShape([100])           # labels, padded to longest
+                            tf.TensorShape([None, 4]),       # bounding boxes, padded to longest
+                            tf.TensorShape([None])           # labels, padded to longest
                             ),
                             padding_values=(0.0, 0.0, 0.0, -1))
 
@@ -60,7 +64,9 @@ def flip_channels(img, img_meta, bbox, label):
     img = tf.reverse(img, axis=[-1])
     return img, img_meta, bbox, label
 
-train_tf_dataset = iter(train_tf_dataset.map(flip_channels, num_parallel_calls=16).repeat())
+train_tf_dataset = train_tf_dataset.filter(lambda w, x, y, z: tf.equal(tf.shape(w)[0], batch_size))
+train_tf_dataset = train_tf_dataset.map(flip_channels, num_parallel_calls=16)
+train_tf_dataset = iter(train_tf_dataset.repeat())
 
 model = faster_rcnn.FasterRCNN(
     num_classes=len(train_dataset.get_categories()), batch_size=batch_size)
@@ -80,8 +86,8 @@ model.layers[0].trainable=False
     if type(layer)!=BatchNormalization:
         layer.trainable=True'''
 
-scheduler = schedulers.WarmupExponentialDecay(1e-4, 1e-2, 500,
-                                              1e-4, steps_per_epoch*12)
+scheduler = schedulers.WarmupExponentialDecay(warmup_rate, learning_rate, warmup_steps,
+                                              steps_per_epoch*12, learning_rate*1e-1)
 #scheduler = tf.keras.optimizers.schedules.PiecewiseConstantDecay([steps_per_epoch*5],
 #                                                                 [1e-3, 1e-4])
 #optimizer = tf.keras.optimizers.SGD(1e-3, momentum=0.9, nesterov=True, clipnorm=5.0)
@@ -105,126 +111,53 @@ def train_step(inputs):
     scaled_grads = tape.gradient(scaled_loss, model.trainable_variables)
     #grads = tape.gradient(loss_value, model.trainable_variables)
     grads = optimizer.get_unscaled_gradients(scaled_grads)
-    grads = [clip_ops.clip_by_norm(g, 5.0) for g in grads]
-    grads = [grad if grad is not None else tf.zeros_like(var) for var, grad in zip(model.trainable_variables, grads)]
+    grads = [tf.clip_by_norm(g, 2.0) for g in grads]
+    grads = [grad if grad is not None \
+             else tf.zeros_like(var) \
+             for var, grad in zip(model.trainable_variables, grads)]
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
     return rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss
 
-total_epochs = 1
+def train_epoch(epochs=1, filename=None):
+    for epoch in range(epochs):
+        rpn_class_loss_history = []
+        rpn_bbox_loss_history = []
+        rcnn_class_loss_history = []
+        rcnn_bbox_loss_history = [] 
+        if hvd.rank()==0:
+            progressbar = tqdm(range(steps_per_epoch))
+            for batch in progressbar:
+                inputs = next(train_tf_dataset)
+                rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = train_step(inputs)
+                rpn_class_loss_history.append(rpn_class_loss)
+                rpn_bbox_loss_history.append(rpn_bbox_loss)
+                rcnn_class_loss_history.append(rcnn_class_loss)
+                rcnn_bbox_loss_history.append(rcnn_bbox_loss)
+                progressbar.set_description("rpnc: {0:.5f} rpnb {1:.5f} rcnc {2:.5f} rcnb {3:.5f} lr {4:.5f}". \
+                                            format(np.array(rpn_class_loss_history[-200:]).mean(),
+                                            np.array(rpn_bbox_loss_history[-200:]).mean(),
+                                            np.array(rcnn_class_loss_history[-200:]).mean(),
+                                            np.array(rcnn_bbox_loss_history[-200:]).mean(),
+                                            scheduler(optimizer.iterations)))
 
-epochs = 1
-for epoch in range(epochs):
-    rpn_class_loss_history = []
-    rpn_bbox_loss_history = []
-    rcnn_class_loss_history = []
-    rcnn_bbox_loss_history = []
-    if hvd.rank()==0:
-        progressbar = tqdm(range(steps_per_epoch))
-        for batch in progressbar:
-            inputs = next(train_tf_dataset)
-            rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = train_step(inputs)
-            rpn_class_loss_history.append(rpn_class_loss)
-            rpn_bbox_loss_history.append(rpn_bbox_loss)
-            rcnn_class_loss_history.append(rcnn_class_loss)
-            rcnn_bbox_loss_history.append(rcnn_bbox_loss)
-            progressbar.set_description("rpnc: {0:.5f} rpnb {1:.5f} rcnc {2:.5f} rcnb {3:.5f}". \
-                                        format(np.array(rpn_class_loss_history[-200:]).mean(),
-                                        np.array(rpn_bbox_loss_history[-200:]).mean(),
-                                        np.array(rcnn_class_loss_history[-200:]).mean(),
-                                        np.array(rcnn_bbox_loss_history[-200:]).mean()))
-                                        
-        model.save_weights("rcnn101_sgdw_training_epoch_{}.h5".format(total_epochs))
-        total_epochs+=1
-    else:
-        for batch in range(steps_per_epoch):
-            inputs = next(train_tf_dataset)
-            rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = train_step(inputs)
-            
+        else:
+            for batch in range(steps_per_epoch):
+                inputs = next(train_tf_dataset)
+                rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = train_step(inputs)
+    if hvd.rank()==0 and filename:
+        model.save_weights(filename)
+    
+train_epoch(epochs=2, filename = 'rcnn_keras_resnet_50_stage_1.h5')
+
+    
 for layer in model.layers[0].layers[0].layers[142:]:
     if type(layer)!=BatchNormalization:
         layer.trainable=True
 
-epochs = 5
-for epoch in range(epochs):
-    rpn_class_loss_history = 0
-    rpn_class_loss_count=1
-    rpn_bbox_loss_history = 0
-    rpn_bbox_loss_count=1
-    rcnn_class_loss_history = 0
-    rcnn_class_loss_count=1
-    rcnn_bbox_loss_history = 0
-    rcnn_bbox_loss_count=1
-    if hvd.rank()==0:
-        progressbar = tqdm(range(steps_per_epoch))
-        for batch in progressbar:
-            inputs = next(train_tf_dataset)
-            rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = train_step(inputs)
-            if not np.isnan(rpn_class_loss.numpy()):
-                rpn_class_loss_history += rpn_class_loss.numpy()
-                rpn_class_loss_count+=1
-            if not np.isnan(rpn_bbox_loss.numpy()):
-                rpn_bbox_loss_history += rpn_bbox_loss.numpy()
-                rpn_bbox_loss_count+=1
-            if not np.isnan(rcnn_class_loss.numpy()) and rcnn_class_loss.numpy()!=0:
-                rcnn_class_loss_history += rcnn_class_loss.numpy()
-                rcnn_class_loss_count+=1
-            if not np.isnan(rcnn_bbox_loss.numpy()) and rcnn_bbox_loss.numpy()!=0:
-                rcnn_bbox_loss_history += rcnn_bbox_loss.numpy()
-                rcnn_bbox_loss_count+=1
-            progressbar.set_description("rpnc: {0:.5f} rpnb {1:.5f} rcnc {2:.5f} rcnb {3:.5f}". \
-                                        format(rpn_class_loss_history/rpn_class_loss_count,
-                                        rpn_bbox_loss_history/rpn_bbox_loss_count,
-                                        rcnn_class_loss_history/rcnn_class_loss_count,
-                                        rcnn_bbox_loss_history/rcnn_bbox_loss_count))
-                                        
-        model.save_weights("rcnn50_adam_training_epoch_{}.h5".format(total_epochs))
-        total_epochs+=1
-    else:
-        for batch in range(steps_per_epoch):
-            inputs = next(train_tf_dataset)
-            rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = train_step(inputs)
-            
+train_epoch(epochs=4, filename = 'rcnn_keras_resnet_50_stage_2.h5')
+
 for layer in model.layers[0].layers[0].layers[80:]:
     if type(layer)!=BatchNormalization:
         layer.trainable=True
-
-epochs = 4
-for epoch in range(epochs):
-    rpn_class_loss_history = 0
-    rpn_class_loss_count=1
-    rpn_bbox_loss_history = 0
-    rpn_bbox_loss_count=1
-    rcnn_class_loss_history = 0
-    rcnn_class_loss_count=1
-    rcnn_bbox_loss_history = 0
-    rcnn_bbox_loss_count=1
-    if hvd.rank()==0:
-        progressbar = tqdm(range(steps_per_epoch))
-        for batch in progressbar:
-            inputs = next(train_tf_dataset)
-            rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = train_step(inputs)
-            if not np.isnan(rpn_class_loss.numpy()):
-                rpn_class_loss_history += rpn_class_loss.numpy()
-                rpn_class_loss_count+=1
-            if not np.isnan(rpn_bbox_loss.numpy()):
-                rpn_bbox_loss_history += rpn_bbox_loss.numpy()
-                rpn_bbox_loss_count+=1
-            if not np.isnan(rcnn_class_loss.numpy()) and rcnn_class_loss.numpy()!=0:
-                rcnn_class_loss_history += rcnn_class_loss.numpy()
-                rcnn_class_loss_count+=1
-            if not np.isnan(rcnn_bbox_loss.numpy()) and rcnn_bbox_loss.numpy()!=0:
-                rcnn_bbox_loss_history += rcnn_bbox_loss.numpy()
-                rcnn_bbox_loss_count+=1
-            progressbar.set_description("rpnc: {0:.5f} rpnb {1:.5f} rcnc {2:.5f} rcnb {3:.5f}". \
-                                        format(rpn_class_loss_history/rpn_class_loss_count,
-                                        rpn_bbox_loss_history/rpn_bbox_loss_count,
-                                        rcnn_class_loss_history/rcnn_class_loss_count,
-                                        rcnn_bbox_loss_history/rcnn_bbox_loss_count))
-                                        
-        model.save_weights("rcnn50_adam_training_epoch_{}.h5".format(total_epochs))
-        total_epochs+=1
-    else:
-        for batch in range(steps_per_epoch):
-            inputs = next(train_tf_dataset)
-            rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = train_step(inputs)
-            
+        
+train_epoch(epochs=6, filename = 'rcnn_keras_resnet_50_stage_3.h5')

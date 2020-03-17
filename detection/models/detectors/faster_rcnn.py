@@ -28,6 +28,7 @@ class FasterRCNN(tf.keras.Model, RPNTestMixin, BBoxTestMixin):
         # RPN training configuration
         self.PRN_BATCH_SIZE = 256
         self.RPN_POS_FRAC = 0.5
+        self.RPN_NEG_MULTI = 1
         self.RPN_POS_IOU_THR = 0.7
         self.RPN_NEG_IOU_THR = 0.3
 
@@ -59,7 +60,7 @@ class FasterRCNN(tf.keras.Model, RPNTestMixin, BBoxTestMixin):
             target_means=self.RCNN_TARGET_MEANS,
             target_stds=self.RPN_TARGET_STDS, 
             num_rcnn_deltas=self.RCNN_BATCH_SIZE,
-            positive_fraction=self.RCNN_POS_FRAC,
+            positive_fraction=self.RPN_POS_FRAC,
             pos_iou_thr=self.RCNN_POS_IOU_THR,
             neg_iou_thr=self.RCNN_NEG_IOU_THR)
                 
@@ -84,7 +85,7 @@ class FasterRCNN(tf.keras.Model, RPNTestMixin, BBoxTestMixin):
             target_means=self.RPN_TARGET_MEANS,
             target_stds=self.RPN_TARGET_STDS,
             num_rpn_deltas=self.PRN_BATCH_SIZE,
-            positive_fraction=self.RPN_POS_FRAC,
+            neg_multiplier=self.RPN_NEG_MULTI,
             pos_iou_thr=self.RPN_POS_IOU_THR,
             neg_iou_thr=self.RPN_NEG_IOU_THR,
             batch_size = self.BATCH_SIZE,

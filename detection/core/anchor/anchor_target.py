@@ -8,7 +8,7 @@ class AnchorTarget(object):
                  target_means=(0., 0., 0., 0.), 
                  target_stds=(0.1, 0.1, 0.2, 0.2),
                  num_rpn_deltas=256,
-                 positive_fraction=0.5,
+                 neg_multiplier=1,
                  pos_iou_thr=0.7,
                  neg_iou_thr=0.3,
                  batch_size=1):
@@ -19,14 +19,14 @@ class AnchorTarget(object):
             target_means: [4]. Bounding box refinement mean for RPN.
             target_stds: [4]. Bounding box refinement standard deviation for RPN.
             num_rpn_deltas: int. Maximal number of Anchors per image to feed to rpn heads.
-            positive_fraction: float.
+            neg_multiplier: float.
             pos_iou_thr: float.
             neg_iou_thr: float.
         '''
         self.target_means = target_means
         self.target_stds = target_stds
         self.num_rpn_deltas = num_rpn_deltas
-        self.positive_fraction = positive_fraction
+        self.neg_multiplier = neg_multiplier
         self.pos_iou_thr = pos_iou_thr
         self.neg_iou_thr = neg_iou_thr
         self.batch_size = batch_size
@@ -82,7 +82,7 @@ class AnchorTarget(object):
         neg_ids = tf.where(tf.equal(target_matches, -1))
         neg_ids = tf.gather(neg_ids, 
                   tf.concat([tf.random.shuffle(tf.reshape(tf.where(neg_ids[...,0]==i), [-1])) \
-                                                [:tf.math.minimum(tf.shape(tf.where(pos_ids[...,0]==i))[0]*2,
+                    [:tf.math.minimum(tf.shape(tf.where(pos_ids[...,0]==i))[0]*self.neg_multiplier,
                                                                   self.num_rpn_deltas)] \
                              for i in range(self.batch_size)], axis=0))
         '''neg_ids = tf.gather(neg_ids, 

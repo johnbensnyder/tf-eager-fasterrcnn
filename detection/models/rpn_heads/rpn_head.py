@@ -17,7 +17,7 @@ class RPNHead(tf.keras.Model):
                  target_means=(0., 0., 0., 0.), 
                  target_stds=(0.1, 0.1, 0.2, 0.2), 
                  num_rpn_deltas=256,
-                 positive_fraction=0.5,
+                 neg_multiplier=1,
                  pos_iou_thr=0.7,
                  neg_iou_thr=0.3,
                  batch_size=1,
@@ -62,7 +62,7 @@ class RPNHead(tf.keras.Model):
             target_means=target_means, 
             target_stds=target_stds,
             num_rpn_deltas=num_rpn_deltas,
-            positive_fraction=positive_fraction,
+            neg_multiplier=neg_multiplier,
             pos_iou_thr=pos_iou_thr,
             neg_iou_thr=neg_iou_thr,
             batch_size=self.batch_size)
