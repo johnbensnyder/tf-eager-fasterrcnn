@@ -108,7 +108,8 @@ class BBoxTestMixin(object):
         return self._unmold_detections(detections_list, img_metas)[0]
 
 
-    def _get_detections(self, rcnn_feature_maps, img_metas, proposals):
+    # @tf.function(experimental_relax_shapes=True)        
+    def _get_detections(self, rcnn_feature_maps, img_metas, rois):
         '''
         Args
         ---
@@ -116,8 +117,6 @@ class BBoxTestMixin(object):
             img_meta: np.ndarray. [11]
         
         '''
-        rois = tf.Variable(proposals)
-        
         pooled_regions = self.roi_align(
             (rois, rcnn_feature_maps, img_metas), training=False)
 
@@ -126,17 +125,10 @@ class BBoxTestMixin(object):
 
         detections_list = self.bbox_head.get_bboxes(
             rcnn_probs, rcnn_deltas, rois, img_metas)
-        
+        return detections_list
+
+
     def simple_test_bboxes_tf(self, rcnn_feature_maps, img_metas, proposals):
         rois = tf.Variable(proposals)
-        
-        pooled_regions = self.roi_align(
-            (rois, rcnn_feature_maps, img_metas), training=False)
-
-        rcnn_class_logits, rcnn_probs, rcnn_deltas = \
-            self.bbox_head(pooled_regions, training=False)
-
-        detections_list = self.bbox_head.get_bboxes(
-            rcnn_probs, rcnn_deltas, rois, img_metas)
-        
+        detections_list = self._get_detections(rcnn_feature_maps, img_metas, rois)        
         return self._unmold_detections(detections_list, img_metas)[0]

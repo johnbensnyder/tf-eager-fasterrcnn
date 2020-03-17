@@ -114,7 +114,7 @@ class BBoxHead(tf.keras.Model):
         ]
         return detections_list
 
-
+    @tf.function
     def _get_bboxes_single_EXPERIMENTAL(self, rcnn_probs, rcnn_deltas, rois, img_shape):
         '''
         Args
@@ -159,9 +159,14 @@ class BBoxHead(tf.keras.Model):
         pre_nms_scores = tf.gather(class_scores, keep)
         pre_nms_rois = tf.gather(refined_rois,   keep)
         unique_pre_nms_class_ids = tf.unique(pre_nms_class_ids)[0]
-
-        def nms_keep_map(class_id):
+        
+        @tf.function
+        def nms_keep_map(i, class_ids):
             '''Apply Non-Maximum Suppression on ROIs of the given class.'''
+            if tf.reduce_any(tf.equal(i, class_ids)):
+                class_id = i
+            else:
+                return tf.constant([], dtype=tf.int64)
             # Indices of ROIs of the given class
             ixs = tf.where(tf.equal(pre_nms_class_ids, class_id))[:, 0]
             # Apply NMS
@@ -175,25 +180,18 @@ class BBoxHead(tf.keras.Model):
             return class_keep
 
         # 2. Map over class IDs
-#        nms_keep = []
-#        for i in range(tf.shape(unique_pre_nms_class_ids)[0]):
-#            nms_keep.append(nms_keep_map(unique_pre_nms_class_ids[i]))
-#        if len(nms_keep) != 0:
-#            nms_keep = tf.concat(nms_keep, axis=0)
-#        else:
-#            nms_keep = tf.zeros([0,], tf.int64)
-
-        nms_keep = tf.map_fn(nms_keep_map, unique_pre_nms_class_ids, dtype=tf.int64)
+        nms_keep = []
+        for i in range(81): #tf.shape(unique_pre_nms_class_ids)[0]):
+            nms_keep.append(nms_keep_map(tf.constant(i), unique_pre_nms_class_ids))
+        if len(nms_keep) != 0:
+            nms_keep = tf.concat(nms_keep, axis=0)
+        else:
+            nms_keep = tf.zeros([0,], tf.int64)
+#        nms_keep = tf.map_fn(nms_keep_map, unique_pre_nms_class_ids, dtype=tf.int64)
         # 3. Compute intersection between keep and nms_keep
-#        keep = tf.sets.intersection(tf.expand_dims(keep, 0),
-#                                        tf.expand_dims(nms_keep, 0))
-        print(keep.shape)
-        print(tf.shape(nms_keep))
-        if tf.shape(nms_keep)[0] == 0:
-            return tf.concat([tf.constant([0.,0.,0.,0.]), tf.constant([0.]), tf.constant([0.])], axis=1)
-        print(keep)
-        print(nms_keep)
-        keep = tf.sets.intersection(tf.expand_dims(keep, 0), nms_keep)
+        keep = tf.sets.intersection(tf.expand_dims(keep, 0),
+                                        tf.expand_dims(nms_keep, 0))
+#        keep = tf.sets.intersection(tf.expand_dims(keep, 0), nms_keep)
         keep = tf.sparse.to_dense(keep)[0]
         # Keep top detections
         roi_count = self.max_instances
@@ -201,7 +199,6 @@ class BBoxHead(tf.keras.Model):
         num_keep = tf.minimum(tf.shape(class_scores_keep)[0], roi_count)
         top_ids = tf.nn.top_k(class_scores_keep, k=num_keep, sorted=True)[1]
         keep = tf.gather(keep, top_ids)  
-        
         detections = tf.concat([
             tf.gather(refined_rois, keep),
             tf.cast(tf.gather(class_ids, keep), tf.float32)[..., tf.newaxis],
