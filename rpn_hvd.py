@@ -5,6 +5,7 @@ import numpy as np
 import horovod.tensorflow as hvd
 from tqdm import tqdm
 from tensorflow.python.keras.layers.normalization import BatchNormalization
+from tensorflow.python.ops import clip_ops
 
 from detection.datasets import coco, data_generator
 
@@ -14,7 +15,7 @@ from detection.utils import schedulers
 hvd.init()
 # mpirun -np 4 -H localhost:4 --bind-to none --allow-run-as-root python rpn_hvd.py
 #tf.config.optimizer.set_jit(True)
-tf.config.optimizer.set_experimental_options({"auto_mixed_precision": True})
+tf.config.optimizer.set_experimental_options({"auto_mixed_precision": False})
 
 gpus = tf.config.experimental.list_physical_devices('GPU')
 for gpu in gpus:
@@ -29,8 +30,8 @@ img_mean = (123.68, 116.779, 103.939)
 img_std = (1., 1., 1.)
 #img_std = (127.5, 127.5, 127.5)
 images = 118000
-batch_size = 1
-loss_weights = [4, 1, 1, 1]
+batch_size = 6
+loss_weights = [1, 1, 1, 1]
 steps_per_epoch = images//(batch_size*hvd.size())
 train_dataset = coco.CocoDataSet('/workspace/shared_workspace/data/coco', 'train',
                                  flip_ratio=0.5,
@@ -43,7 +44,7 @@ train_generator = data_generator.DataGenerator(train_dataset, shuffle=True)
 train_tf_dataset = tf.data.Dataset.from_generator(
     train_generator, (tf.float32, tf.float32, tf.float32, tf.int32))
 
-train_tf_dataset = train_tf_dataset.prefetch(128) #.shuffle(100).shard(hvd.size(), hvd.rank())
+train_tf_dataset = train_tf_dataset.prefetch(256) #.shuffle(100).shard(hvd.size(), hvd.rank())
 train_tf_dataset = train_tf_dataset.padded_batch(
                             batch_size,
                             padded_shapes=(
@@ -59,7 +60,7 @@ def flip_channels(img, img_meta, bbox, label):
     img = tf.reverse(img, axis=[-1])
     return img, img_meta, bbox, label
 
-train_tf_dataset = iter(train_tf_dataset.map(flip_channels, num_parallel_calls=4).repeat())
+train_tf_dataset = iter(train_tf_dataset.map(flip_channels, num_parallel_calls=16).repeat())
 
 model = faster_rcnn.FasterRCNN(
     num_classes=len(train_dataset.get_categories()), batch_size=batch_size)
@@ -75,11 +76,11 @@ for i in train_tf_dataset:
 #model.layers[4].trainable=False
 #model.layers[0].load_weights('resnet_101_backbone.h5')
 model.layers[0].trainable=False
-for layer in model.layers[0].layers[0].layers[80:]:
+'''for layer in model.layers[0].layers[0].layers[80:]:
     if type(layer)!=BatchNormalization:
-        layer.trainable=True
+        layer.trainable=True'''
 
-scheduler = schedulers.WarmupExponentialDecay(1e-3, 1e-2, steps_per_epoch,
+scheduler = schedulers.WarmupExponentialDecay(1e-4, 1e-2, 500,
                                               1e-4, steps_per_epoch*12)
 #scheduler = tf.keras.optimizers.schedules.PiecewiseConstantDecay([steps_per_epoch*5],
 #                                                                 [1e-3, 1e-4])
@@ -99,18 +100,19 @@ def train_step(inputs):
                       + loss_weights[1] * rpn_bbox_loss \
                       + loss_weights[2] * rcnn_class_loss \
                       + loss_weights[3] * rcnn_bbox_loss)
-        #scaled_loss = optimizer.get_scaled_loss(loss_value)
+        scaled_loss = optimizer.get_scaled_loss(loss_value)
     tape = hvd.DistributedGradientTape(tape)
-    #scaled_grads = tape.gradient(scaled_loss, model.trainable_variables)
-    grads = tape.gradient(loss_value, model.trainable_variables)
-    #grads = optimizer.get_unscaled_gradients(scaled_grads)
+    scaled_grads = tape.gradient(scaled_loss, model.trainable_variables)
+    #grads = tape.gradient(loss_value, model.trainable_variables)
+    grads = optimizer.get_unscaled_gradients(scaled_grads)
+    grads = [clip_ops.clip_by_norm(g, 5.0) for g in grads]
     grads = [grad if grad is not None else tf.zeros_like(var) for var, grad in zip(model.trainable_variables, grads)]
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
     return rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss
 
 total_epochs = 1
 
-epochs = 3
+epochs = 1
 for epoch in range(epochs):
     rpn_class_loss_history = []
     rpn_bbox_loss_history = []

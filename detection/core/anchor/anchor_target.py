@@ -82,7 +82,7 @@ class AnchorTarget(object):
         neg_ids = tf.where(tf.equal(target_matches, -1))
         neg_ids = tf.gather(neg_ids, 
                   tf.concat([tf.random.shuffle(tf.reshape(tf.where(neg_ids[...,0]==i), [-1])) \
-                                                [:tf.math.minimum(tf.shape(tf.where(pos_ids[...,0]==i))[0]*5,
+                                                [:tf.math.minimum(tf.shape(tf.where(pos_ids[...,0]==i))[0]*2,
                                                                   self.num_rpn_deltas)] \
                              for i in range(self.batch_size)], axis=0))
         '''neg_ids = tf.gather(neg_ids, 
@@ -126,34 +126,33 @@ class AnchorTarget(object):
     
     @tf.function(experimental_relax_shapes=True)
     def pad_target_deltas(self, target_deltas, pos_ids):
-        reshaped_images = tf.TensorArray(tf.float32, size=4)
+        reshaped_images = tf.TensorArray(tf.float32, size=self.batch_size)
         max_deltas = tf.reduce_max(tf.unique_with_counts(pos_ids[...,0])[2])
-        for i in range(4):
+        for i in range(self.batch_size):
             image_gt = tf.gather_nd(target_deltas, tf.where(pos_ids[...,0]==i))
             image_gt = tf.pad(image_gt, [[0,max_deltas-tf.shape(image_gt)[0]], [0,0]])
             reshaped_images = reshaped_images.write(i, image_gt)
         return reshaped_images.stack()
     
     def build_targets(self, anchors, valid_flags, bboxes, labels):
-        batch_size = tf.shape(bboxes)[0]
         anchor_size = tf.shape(anchors)[0]
         ious = self.batch_iou(anchors, bboxes)
         anchor_iou_argmax = self.compute_argmax(ious)
         anchor_iou_max = tf.reduce_max(ious, axis=2)
-        target_matches = tf.zeros((batch_size, anchor_size), dtype=tf.int32)
+        target_matches = tf.zeros((self.batch_size, anchor_size), dtype=tf.int32)
         # get negative values
         target_matches = tf.where(anchor_iou_max < self.neg_iou_thr, 
-                                -tf.ones((batch_size, anchor_size), dtype=tf.int32), target_matches)
+                                -tf.ones((self.batch_size, anchor_size), dtype=tf.int32), target_matches)
         # filter invalid flags
         target_matches = tf.where(tf.equal(valid_flags, 1),
-                                         target_matches, tf.zeros((batch_size, anchor_size), dtype=tf.int32))
+                                         target_matches, tf.zeros((self.batch_size, anchor_size), dtype=tf.int32))
         # get pos anchors
         target_matches = tf.where(anchor_iou_max >= self.pos_iou_thr, 
-                                  tf.ones((batch_size, anchor_size), dtype=tf.int32), target_matches)
+                                  tf.ones((self.batch_size, anchor_size), dtype=tf.int32), target_matches)
         # fill in missing gt values
         target_matches = self.fill_missing_gts(target_matches, ious)
         pos_ids, neg_ids, target_matches = self.subset_targets(target_matches)
-        a = tf.gather_nd(tf.tile(tf.expand_dims(anchors, axis=0), [batch_size, 1, 1]), pos_ids)
+        a = tf.gather_nd(tf.tile(tf.expand_dims(anchors, axis=0), [self.batch_size, 1, 1]), pos_ids)
         anchor_idx = tf.gather_nd(anchor_iou_argmax, pos_ids)
         anchor_idx = tf.transpose(tf.stack([pos_ids[...,0], anchor_idx]))
         gt = tf.gather_nd(bboxes, anchor_idx)
