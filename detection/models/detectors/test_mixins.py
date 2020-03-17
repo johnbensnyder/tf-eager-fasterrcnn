@@ -5,7 +5,6 @@ from detection.core.bbox import transforms
 from detection.utils.misc import *
 
 class RPNTestMixin(object):
-    
     def simple_test_rpn(self, img, img_meta):
         '''
         Args
@@ -17,6 +16,32 @@ class RPNTestMixin(object):
         imgs = tf.Variable(np.expand_dims(img, 0))
         img_metas = tf.Variable(np.expand_dims(img_meta, 0))
 
+
+        x = self.backbone(imgs, training=False)
+        x = self.neck(x, training=False)
+
+        rpn_class_logits, rpn_probs, rpn_deltas = self.rpn_head(x, training=False)
+
+        proposals = self.rpn_head.get_proposals(
+            rpn_probs, rpn_deltas, img_metas, with_probs=False)
+
+        #proposals = tf.reshape(proposals, [-1, 5])
+
+        return proposals
+
+    @tf.function(experimental_relax_shapes=True)
+    def simple_test_rpn_tf(self, img, img_meta):
+        '''
+        Args
+        ---
+            imgs: np.ndarray. [height, width, channel]
+            img_metas: np.ndarray. [11]
+        
+        '''
+        imgs = tf.expand_dims(img, axis=0)
+        img_metas = tf.expand_dims(img_meta, axis=0)
+
+
         x = self.backbone(imgs, training=False)
         x = self.neck(x, training=False)
         
@@ -26,8 +51,8 @@ class RPNTestMixin(object):
             rpn_probs, rpn_deltas, img_metas, with_probs=False)
         
         #proposals = tf.reshape(proposals, [-1, 5])
-        
-        return proposals
+        rcnn_feature_maps = x
+        return rcnn_feature_maps, img_metas, proposals
     
 class BBoxTestMixin(object):
     
@@ -52,6 +77,7 @@ class BBoxTestMixin(object):
                 'class_ids': class_ids.numpy(),
                 'scores': scores.numpy()}
 
+
     def simple_test_bboxes(self, img, img_meta, proposals):
         '''
         Args
@@ -66,16 +92,50 @@ class BBoxTestMixin(object):
 
         x = self.backbone(imgs, training=False)
         P2, P3, P4, P5, _ = self.neck(x, training=False)
-        
+
         rcnn_feature_maps = [P2, P3, P4, P5]
+
+
+        pooled_regions = self.roi_align(
+            (rois, rcnn_feature_maps, img_metas), training=False)
+
+        rcnn_class_logits, rcnn_probs, rcnn_deltas = \
+            self.bbox_head(pooled_regions, training=False)
+
+        detections_list = self.bbox_head.get_bboxes(
+            rcnn_probs, rcnn_deltas, rois, img_metas)
+
+        return self._unmold_detections(detections_list, img_metas)[0]
+
+
+    def _get_detections(self, rcnn_feature_maps, img_metas, proposals):
+        '''
+        Args
+        ---
+            imgs: np.ndarray. [height, width, channel]
+            img_meta: np.ndarray. [11]
         
+        '''
+        rois = tf.Variable(proposals)
         
         pooled_regions = self.roi_align(
             (rois, rcnn_feature_maps, img_metas), training=False)
 
         rcnn_class_logits, rcnn_probs, rcnn_deltas = \
             self.bbox_head(pooled_regions, training=False)
+
+        detections_list = self.bbox_head.get_bboxes(
+            rcnn_probs, rcnn_deltas, rois, img_metas)
         
+    def simple_test_bboxes_tf(self, rcnn_feature_maps, img_metas, proposals):
+        rois = tf.Variable(proposals)
+        
+        pooled_regions = self.roi_align(
+            (rois, rcnn_feature_maps, img_metas), training=False)
+
+        rcnn_class_logits, rcnn_probs, rcnn_deltas = \
+            self.bbox_head(pooled_regions, training=False)
+
         detections_list = self.bbox_head.get_bboxes(
             rcnn_probs, rcnn_deltas, rois, img_metas)
         

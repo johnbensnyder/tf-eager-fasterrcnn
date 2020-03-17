@@ -113,7 +113,104 @@ class BBoxHead(tf.keras.Model):
             for i in range(img_metas.shape[0])
         ]
         return detections_list
-    
+
+
+    def _get_bboxes_single_EXPERIMENTAL(self, rcnn_probs, rcnn_deltas, rois, img_shape):
+        '''
+        Args
+        ---
+            rcnn_probs: [num_rois, num_classes]
+            rcnn_deltas: [num_rois, num_classes, (dy, dx, log(dh), log(dw))]
+            rois: [num_rois, (y1, x1, y2, x2)]
+            img_shape: np.ndarray. [2]. (img_height, img_width)       
+        '''
+        H = tf.cast(img_shape[0], tf.float32)
+        W = tf.cast(img_shape[1], tf.float32)  
+        # Class IDs per ROI
+        class_ids = tf.argmax(rcnn_probs, axis=1, output_type=tf.int32)
+        
+        # Class probability of the top class of each ROI
+        indices = tf.stack([tf.range(tf.shape(rcnn_probs)[0]), class_ids], axis=1)
+        class_scores = tf.gather_nd(rcnn_probs, indices)
+        # Class-specific bounding box deltas
+        deltas_specific = tf.gather_nd(rcnn_deltas, indices)
+        # Apply bounding box deltas
+        # Shape: [num_rois, (y1, x1, y2, x2)] in normalized coordinates        
+        refined_rois = transforms.delta2bbox(rois, deltas_specific, self.target_means, self.target_stds)
+        
+        # Clip boxes to image window
+        refined_rois *= tf.cast(tf.stack([H, W, H, W]), tf.float32)
+        window = tf.stack([0., 0., H * 1., W * 1.])
+        refined_rois = transforms.bbox_clip(refined_rois, window)
+        
+        # Filter out background boxes
+        keep = tf.where(class_ids > 0)[:, 0]
+        
+        # Filter out low confidence boxes
+        if self.min_confidence:
+            conf_keep = tf.where(class_scores >= self.min_confidence)[:, 0]
+            keep = tf.sets.intersection(tf.expand_dims(keep, 0),
+                                            tf.expand_dims(conf_keep, 0))
+            keep = tf.sparse.to_dense(keep)[0]
+            
+        # Apply per-class NMS
+        # 1. Prepare variables
+        pre_nms_class_ids = tf.gather(class_ids, keep)
+        pre_nms_scores = tf.gather(class_scores, keep)
+        pre_nms_rois = tf.gather(refined_rois,   keep)
+        unique_pre_nms_class_ids = tf.unique(pre_nms_class_ids)[0]
+
+        def nms_keep_map(class_id):
+            '''Apply Non-Maximum Suppression on ROIs of the given class.'''
+            # Indices of ROIs of the given class
+            ixs = tf.where(tf.equal(pre_nms_class_ids, class_id))[:, 0]
+            # Apply NMS
+            class_keep = tf.image.non_max_suppression(
+                    tf.gather(pre_nms_rois, ixs),
+                    tf.gather(pre_nms_scores, ixs),
+                    max_output_size=self.max_instances,
+                    iou_threshold=self.nms_threshold)
+            # Map indices
+            class_keep = tf.gather(keep, tf.gather(ixs, class_keep))
+            return class_keep
+
+        # 2. Map over class IDs
+#        nms_keep = []
+#        for i in range(tf.shape(unique_pre_nms_class_ids)[0]):
+#            nms_keep.append(nms_keep_map(unique_pre_nms_class_ids[i]))
+#        if len(nms_keep) != 0:
+#            nms_keep = tf.concat(nms_keep, axis=0)
+#        else:
+#            nms_keep = tf.zeros([0,], tf.int64)
+
+        nms_keep = tf.map_fn(nms_keep_map, unique_pre_nms_class_ids, dtype=tf.int64)
+        # 3. Compute intersection between keep and nms_keep
+#        keep = tf.sets.intersection(tf.expand_dims(keep, 0),
+#                                        tf.expand_dims(nms_keep, 0))
+        print(keep.shape)
+        print(tf.shape(nms_keep))
+        if tf.shape(nms_keep)[0] == 0:
+            return tf.concat([tf.constant([0.,0.,0.,0.]), tf.constant([0.]), tf.constant([0.])], axis=1)
+        print(keep)
+        print(nms_keep)
+        keep = tf.sets.intersection(tf.expand_dims(keep, 0), nms_keep)
+        keep = tf.sparse.to_dense(keep)[0]
+        # Keep top detections
+        roi_count = self.max_instances
+        class_scores_keep = tf.gather(class_scores, keep)
+        num_keep = tf.minimum(tf.shape(class_scores_keep)[0], roi_count)
+        top_ids = tf.nn.top_k(class_scores_keep, k=num_keep, sorted=True)[1]
+        keep = tf.gather(keep, top_ids)  
+        
+        detections = tf.concat([
+            tf.gather(refined_rois, keep),
+            tf.cast(tf.gather(class_ids, keep), tf.float32)[..., tf.newaxis],
+            tf.gather(class_scores, keep)[..., tf.newaxis]
+            ], axis=1)
+        
+        return detections
+
+
     def _get_bboxes_single(self, rcnn_probs, rcnn_deltas, rois, img_shape):
         '''
         Args
