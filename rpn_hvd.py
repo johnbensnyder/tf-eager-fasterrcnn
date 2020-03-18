@@ -11,6 +11,7 @@ from detection.datasets import coco, data_generator
 
 from detection.models.detectors import faster_rcnn
 from detection.utils import schedulers
+from detection.core.eval import evaluation
 
 hvd.init()
 # mpirun -np 4 -H localhost:4 --bind-to none --allow-run-as-root python rpn_hvd.py
@@ -31,13 +32,17 @@ img_mean = (123.68, 116.779, 103.939)
 img_std = (1., 1., 1.)
 #img_std = (127.5, 127.5, 127.5)
 images = 118000
-batch_size = 8
-learning_rate = batch_size*hvd.size()*5e-4
-steps_per_epoch = images//(batch_size*hvd.size())
+batch_size = 4
+learning_rate = batch_size*hvd.size()*1e-3
 warmup_rate = learning_rate/10
-warmup_steps = steps_per_epoch
+warmup_steps = 2000
 loss_weights = [1, 1, 1, 1]
-loss_divider = np.array(loss_weights).sum()/4
+steps_per_epoch = images//(batch_size*hvd.size())
+
+############################################################################################################
+#Create Train dataset
+############################################################################################################
+
 train_dataset = coco.CocoDataSet('/workspace/shared_workspace/data/coco', 'train',
                                  flip_ratio=0.5,
                                  pad_mode='fixed',
@@ -47,7 +52,7 @@ train_dataset = coco.CocoDataSet('/workspace/shared_workspace/data/coco', 'train
 
 train_generator = data_generator.DataGenerator(train_dataset, shuffle=True)
 train_tf_dataset = tf.data.Dataset.from_generator(
-    train_generator, (tf.float32, tf.float32, tf.float32, tf.int32))
+    train_generator, (tf.float32, tf.float32, tf.float32, tf.int32, tf.int32))
 
 train_tf_dataset = train_tf_dataset.prefetch(256) #.shuffle(100).shard(hvd.size(), hvd.rank())
 train_tf_dataset = train_tf_dataset.padded_batch(
@@ -56,25 +61,60 @@ train_tf_dataset = train_tf_dataset.padded_batch(
                             tf.TensorShape([None, None, 3]), # image padded to largest in batch
                             tf.TensorShape([11]),            # image meta - no padding
                             tf.TensorShape([None, 4]),       # bounding boxes, padded to longest
-                            tf.TensorShape([None])           # labels, padded to longest
+                            tf.TensorShape([None]),           # labels, padded to longest
+                            tf.TensorShape([None])
                             ),
-                            padding_values=(0.0, 0.0, 0.0, -1))
+                            padding_values=(0.0, 0.0, 0.0, -1, -1))
 
-# flip channel order
-def flip_channels(img, img_meta, bbox, label):
+# flip channel order drop img_id since don't need for training
+def flip_channels(img, img_meta, bbox, label, img_id):
     img = tf.reverse(img, axis=[-1])
     return img, img_meta, bbox, label
 
-train_tf_dataset = train_tf_dataset.filter(lambda w, x, y, z: tf.equal(tf.shape(w)[0], batch_size))
+train_tf_dataset = train_tf_dataset.filter(lambda w, x, y, z, a: tf.equal(tf.shape(w)[0], batch_size))
 train_tf_dataset = train_tf_dataset.map(flip_channels, num_parallel_calls=16)
 train_tf_dataset = iter(train_tf_dataset.repeat())
+
+############################################################################################################
+# Create eval dataset
+############################################################################################################
+val_dataset = coco.CocoDataSet('/workspace/shared_workspace/data/coco/', 'val',
+                               flip_ratio=0,
+                               pad_mode='fixed',
+                               mean=img_mean,
+                               std=img_std,
+                               scale=(800, 1216))
+
+val_generator = data_generator.DataGenerator(val_dataset, shuffle=True)
+val_tf_dataset = tf.data.Dataset.from_generator(
+    val_generator, (tf.float32, tf.float32, tf.float32, tf.int32, tf.int32))
+val_tf_dataset = val_tf_dataset.prefetch(16)
+val_tf_dataset = val_tf_dataset.padded_batch(
+                            batch_size,
+                            padded_shapes=(
+                            tf.TensorShape([None, None, 3]), # image padded to largest in batch
+                            tf.TensorShape([11]),            # image meta - no padding
+                            tf.TensorShape([None, 4]),       # bounding boxes, padded to longest
+                            tf.TensorShape([None]),           # labels, padded to longest
+                            tf.TensorShape([None])),
+                            padding_values=(0.0, 0.0, 0.0, -1, -1))
+def flip_channels(img, img_meta, bbox, label, labels):
+    img = tf.reverse(img, axis=[-1])
+    return img, img_meta, bbox, label, labels
+
+val_tf_dataset = val_tf_dataset.filter(lambda w, x, y, z, a: tf.equal(tf.shape(w)[0], batch_size))
+val_tf_dataset = val_tf_dataset.map(flip_channels, num_parallel_calls=16)
+val_tf_dataset = iter(val_tf_dataset.repeat())
+
+############################################################################################################
+# Create model
+############################################################################################################
 
 model = faster_rcnn.FasterRCNN(
     num_classes=len(train_dataset.get_categories()), batch_size=batch_size)
 
-for i in train_tf_dataset:
-    _ = model(i)
-    break
+imgs, img_metas, bboxes, labels = next(train_tf_dataset)
+_ = model((imgs, img_metas, bboxes, labels))
 
 #model.layers[0].load_weights('resnet_101_backbone.h5')
 '''for layer in model.layers[0].layers[0].layers[:142]:
@@ -83,17 +123,21 @@ for i in train_tf_dataset:
 #model.layers[4].trainable=False
 #model.layers[0].load_weights('resnet_101_backbone.h5')
 model.layers[0].trainable=False
-'''for layer in model.layers[0].layers[0].layers[80:]:
+for layer in model.layers[0].layers[0].layers[80:]:
     if type(layer)!=BatchNormalization:
-        layer.trainable=True'''
+        layer.trainable=True
+
+############################################################################################################
+# create training step and epoch
+############################################################################################################
+
 
 #scheduler = schedulers.WarmupExponentialDecay(warmup_rate, learning_rate, warmup_steps,
-#                                              steps_per_epoch*12, learning_rate)
+#                                              steps_per_epoch*12, learning_rate*1e-1)
 #scheduler = tf.keras.optimizers.schedules.PiecewiseConstantDecay([steps_per_epoch*5],
 #                                                                 [1e-3, 1e-4])
-scheduler = schedulers.WarmupPiecewiseConstantDecay(warmup_rate, warmup_steps,
-                                                    [steps_per_epoch*9, steps_per_epoch*12],
-                                                    [learning_rate, learning_rate*1e-1, learning_rate*1e-2])
+scheduler = schedulers.WarmupPiecewiseConstantDecay(warmup_rate, steps_per_epoch//4, [steps_per_epoch*12],
+                                         [learning_rate, learning_rate*1e-1])
 #optimizer = tf.keras.optimizers.SGD(1e-3, momentum=0.9, nesterov=True, clipnorm=5.0)
 #optimizer = tf.keras.optimizers.SGD(1e-3, momentum=0.9, nesterov=True)
 optimizer = tfa.optimizers.SGDW(1e-4, scheduler, momentum=0.9, nesterov=True)
@@ -109,7 +153,7 @@ def train_step(inputs):
         loss_value = (loss_weights[0] * rpn_class_loss \
                       + loss_weights[1] * rpn_bbox_loss \
                       + loss_weights[2] * rcnn_class_loss \
-                      + loss_weights[3] * rcnn_bbox_loss)/loss_divider
+                      + loss_weights[3] * rcnn_bbox_loss)
         scaled_loss = optimizer.get_scaled_loss(loss_value)
     tape = hvd.DistributedGradientTape(tape)
     scaled_grads = tape.gradient(scaled_loss, model.trainable_variables)
@@ -152,25 +196,38 @@ def train_epoch(epochs=1, filename=None):
     if hvd.rank()==0 and filename:
         model.save_weights(filename)
 
-for layer in model.layers[0].layers[0].layers[80:]:
-    if type(layer)!=BatchNormalization:
-        layer.trainable=True
-
-train_epoch(epochs=15, filename = 'learning_rate_tuning/rcnn_keras_resnet_50_stage_1.h5')
-
+############################################################################################################
+# Create validation step
+############################################################################################################
+        
+@tf.function(experimental_relax_shapes=True)
+def evaluate_tf_function(imgs, img_metas):
+    c2, c3, c4, c5 = model.backbone(imgs, training=False)
+    p2, p3, p4, p5, p6 = model.neck((c2, c3, c4, c5), training=False)
+    rpn_class_logits, rpn_probs, rpn_deltas = model.rpn_head((p2, p3, p4, p5, p6), training=False)
+    proposals = model.rpn_head.get_proposals(rpn_probs, rpn_deltas, img_metas)
+    pooled_regions = model.roi_align((proposals, (p2, p3, p4, p5), img_metas), training=False)
+    cnn_class_logits, rcnn_probs, rcnn_deltas = \
+                model.bbox_head(pooled_regions, training=False)
+    detections_list = model.bbox_head.get_bboxes(
+                    rcnn_probs, rcnn_deltas, proposals, img_metas)
+    return detections_list    
+        
+def evaluate(steps=100):
+    print("Running Evaluation")
+    eval_detections_list = []
+    eval_img_ids = []
+    eval_metas = []
+    for i in tqdm(range(100)):
+        imgs, img_metas, bboxes, labels, ids = next(val_tf_dataset)
+        eval_detections_list.append(evaluate_tf_function(imgs, img_metas))
+        eval_img_ids.append(ids)
+        eval_metas.append(img_metas)
+    evaluation.run_eval(eval_detections_list, eval_img_ids, eval_metas, val_dataset, 
+                        filename='eval_{}.json'.format(hvd.rank()))
     
-'''for layer in model.layers[0].layers[0].layers[142:]:
-    if type(layer)!=BatchNormalization:
-        layer.trainable=True
+    
 
-#train_epoch(epochs=4, filename = 'rcnn_keras_resnet_50_stage_2.h5')
-
-for layer in model.layers[0].layers[0].layers[80:]:
-    if type(layer)!=BatchNormalization:
-        layer.trainable=True
-
-#train_epoch(epochs=6, filename = 'rcnn_keras_resnet_50_stage_3.h5')
-
-model.load_weights('rcnn_keras_resnet_50_stage_3.h5')
-
-train_epoch(epochs=6, filename = 'rcnn_keras_resnet_50_stage_4.h5')'''
+for i in range(15):
+    train_epoch(epochs=1, filename = 'rcnn_keras_resnet_50_stage_{}.h5'.format(i))
+    evaluate()

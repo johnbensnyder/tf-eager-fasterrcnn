@@ -84,8 +84,8 @@ class BBoxHead(tf.keras.Model):
             rcnn_target_deltas, rcnn_target_matchs, rcnn_deltas)
         
         return rcnn_class_loss, rcnn_bbox_loss
-        
-    def get_bboxes(self, rcnn_probs, rcnn_deltas, rois, img_metas):
+    
+    def get_bboxes(self, rcnn_probs, rcnn_deltas, rois, img_metas, min_confidence=None):
         '''
         Args
         ---
@@ -107,14 +107,20 @@ class BBoxHead(tf.keras.Model):
         pad_shapes = calc_pad_shapes(img_metas)
         
         
-        detections_list = [
+        '''detections_list = [
             self._get_bboxes_single(
                 rcnn_probs[i], rcnn_deltas[i], rois[i], pad_shapes[i])
             for i in range(tf.shape(img_metas)[0])
         ]
-        return detections_list
+        return tf.stack(detections_list)'''
+        detections_list = tf.TensorArray(dtype=tf.float32, size=batch_size)
+        for i in range(batch_size):
+            detections_list = detections_list.write(i, self._get_bboxes_single(
+                rcnn_probs[i], rcnn_deltas[i], rois[i], pad_shapes[i], min_confidence=min_confidence))
+        return detections_list.stack()
+        
     
-    def _get_bboxes_single(self, rcnn_probs, rcnn_deltas, rois, img_shape):
+    def _get_bboxes_single(self, rcnn_probs, rcnn_deltas, rois, img_shape, min_confidence=None):
         '''
         Args
         ---
@@ -129,7 +135,7 @@ class BBoxHead(tf.keras.Model):
         class_ids = tf.argmax(rcnn_probs, axis=1, output_type=tf.int32)
         
         # Class probability of the top class of each ROI
-        indices = tf.stack([tf.range(rcnn_probs.shape[0]), class_ids], axis=1)
+        indices = tf.stack([tf.range(tf.shape(rcnn_probs)[0]), class_ids], axis=1)
         class_scores = tf.gather_nd(rcnn_probs, indices)
         # Class-specific bounding box deltas
         deltas_specific = tf.gather_nd(rcnn_deltas, indices)
@@ -148,9 +154,12 @@ class BBoxHead(tf.keras.Model):
         # Filter out background boxes
         keep = tf.where(class_ids > 0)[:, 0]
         
+        if min_confidence==None:
+            min_confidence=self.min_confidence
+        
         # Filter out low confidence boxes
-        if self.min_confidence:
-            conf_keep = tf.where(class_scores >= self.min_confidence)[:, 0]
+        if min_confidence:
+            conf_keep = tf.where(class_scores >= min_confidence)[:, 0]
             keep = tf.sets.intersection(tf.expand_dims(keep, 0),
                                             tf.expand_dims(conf_keep, 0))
             keep = tf.sparse.to_dense(keep)[0]
@@ -177,13 +186,24 @@ class BBoxHead(tf.keras.Model):
             return class_keep
 
         # 2. Map over class IDs
-        nms_keep = []
-        for i in range(unique_pre_nms_class_ids.shape[0]):
+        '''nms_keep = []
+        for i in range(tf.shape(unique_pre_nms_class_ids)[0]):
             nms_keep.append(nms_keep_map(unique_pre_nms_class_ids[i]))
         if len(nms_keep) != 0:
             nms_keep = tf.concat(nms_keep, axis=0)
         else:
+            nms_keep = tf.zeros([0,], tf.int64)'''
+        if tf.shape(unique_pre_nms_class_ids)[0]==0:
             nms_keep = tf.zeros([0,], tf.int64)
+        else:
+            nms_keep = tf.TensorArray(dtype=tf.int64, size=tf.shape(unique_pre_nms_class_ids)[0], dynamic_size=True)
+            count = 0
+            for i in range(tf.shape(unique_pre_nms_class_ids)[0]):
+                nms_result = nms_keep_map(unique_pre_nms_class_ids[i])
+                for j in nms_result:
+                    nms_keep = nms_keep.write(count, j)
+                    count+=1
+            nms_keep = nms_keep.stack()
         
         # 3. Compute intersection between keep and nms_keep
         keep = tf.sets.intersection(tf.expand_dims(keep, 0),
@@ -201,6 +221,8 @@ class BBoxHead(tf.keras.Model):
             tf.cast(tf.gather(class_ids, keep), tf.float32)[..., tf.newaxis],
             tf.gather(class_scores, keep)[..., tf.newaxis]
             ], axis=1)
+        
+        detections = tf.pad(detections, [[0, self.max_instances-tf.shape(detections)[0]], [0,0]])
         
         return detections
         

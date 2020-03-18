@@ -31,7 +31,6 @@ class CocoDataSet(object):
             
 
         self.coco = COCO("{}/annotations/instances_{}2017.json".format(dataset_dir, subset))
-
         # get the mapping from original category ids to labels
         self.cat_ids = self.coco.getCatIds()
         self.cat2label = {
@@ -186,8 +185,8 @@ class CocoDataSet(object):
         })
 
         img_meta = utils.compose_image_meta(img_meta_dict)
-        
-        return img, img_meta, bboxes, labels
+        img_id = np.expand_dims(self.img_ids[idx], axis=0)
+        return img, img_meta, bboxes, labels, img_id
     
     def get_categories(self):
         '''Get list of category names. 

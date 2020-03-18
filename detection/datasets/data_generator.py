@@ -10,5 +10,5 @@ class DataGenerator(object):
         if self.shuffle:
             np.random.shuffle(indices)
         for img_idx in indices:
-            img, img_meta, bbox, label = self.dataset[img_idx]
-            yield img, img_meta, bbox, label
+            img, img_meta, bbox, label, img_id = self.dataset[img_idx]
+            yield img, img_meta, bbox, label, img_id
