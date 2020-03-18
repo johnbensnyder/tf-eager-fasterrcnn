@@ -33,8 +33,8 @@ class FasterRCNN(tf.keras.Model, RPNTestMixin, BBoxTestMixin):
         self.RPN_NEG_IOU_THR = 0.3
 
         # ROIs kept configuration
-        self.PRN_PROPOSAL_COUNT = 2000
-        self.PRN_NMS_THRESHOLD = 0.7
+        self.PRN_PROPOSAL_COUNT = 500
+        self.PRN_NMS_THRESHOLD = 0.5
         
         # RCNN configuration
         # Bounding box refinement mean and standard deviation

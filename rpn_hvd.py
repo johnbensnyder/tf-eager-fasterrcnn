@@ -33,10 +33,11 @@ img_std = (1., 1., 1.)
 images = 118000
 batch_size = 8
 learning_rate = batch_size*hvd.size()*5e-4
-warmup_rate = learning_rate/10
-warmup_steps = 2000
-loss_weights = [1, 1, 1, 1]
 steps_per_epoch = images//(batch_size*hvd.size())
+warmup_rate = learning_rate/10
+warmup_steps = steps_per_epoch
+loss_weights = [1, 1, 1, 1]
+loss_divider = np.array(loss_weights).sum()/4
 train_dataset = coco.CocoDataSet('/workspace/shared_workspace/data/coco', 'train',
                                  flip_ratio=0.5,
                                  pad_mode='fixed',
@@ -86,10 +87,13 @@ model.layers[0].trainable=False
     if type(layer)!=BatchNormalization:
         layer.trainable=True'''
 
-scheduler = schedulers.WarmupExponentialDecay(warmup_rate, learning_rate, warmup_steps,
-                                              steps_per_epoch*12, learning_rate*1e-1)
+#scheduler = schedulers.WarmupExponentialDecay(warmup_rate, learning_rate, warmup_steps,
+#                                              steps_per_epoch*12, learning_rate)
 #scheduler = tf.keras.optimizers.schedules.PiecewiseConstantDecay([steps_per_epoch*5],
 #                                                                 [1e-3, 1e-4])
+scheduler = schedulers.WarmupPiecewiseConstantDecay(warmup_rate, warmup_steps,
+                                                    [steps_per_epoch*9, steps_per_epoch*12],
+                                                    [learning_rate, learning_rate*1e-1, learning_rate*1e-2])
 #optimizer = tf.keras.optimizers.SGD(1e-3, momentum=0.9, nesterov=True, clipnorm=5.0)
 #optimizer = tf.keras.optimizers.SGD(1e-3, momentum=0.9, nesterov=True)
 optimizer = tfa.optimizers.SGDW(1e-4, scheduler, momentum=0.9, nesterov=True)
@@ -105,7 +109,7 @@ def train_step(inputs):
         loss_value = (loss_weights[0] * rpn_class_loss \
                       + loss_weights[1] * rpn_bbox_loss \
                       + loss_weights[2] * rcnn_class_loss \
-                      + loss_weights[3] * rcnn_bbox_loss)
+                      + loss_weights[3] * rcnn_bbox_loss)/loss_divider
         scaled_loss = optimizer.get_scaled_loss(loss_value)
     tape = hvd.DistributedGradientTape(tape)
     scaled_grads = tape.gradient(scaled_loss, model.trainable_variables)
@@ -133,7 +137,8 @@ def train_epoch(epochs=1, filename=None):
                 rpn_bbox_loss_history.append(rpn_bbox_loss)
                 rcnn_class_loss_history.append(rcnn_class_loss)
                 rcnn_bbox_loss_history.append(rcnn_bbox_loss)
-                progressbar.set_description("rpnc: {0:.5f} rpnb {1:.5f} rcnc {2:.5f} rcnb {3:.5f} lr {4:.5f}". \
+                if batch%1==0:
+                    progressbar.set_description("rpnc: {0:.5f} rpnb {1:.5f} rcnc {2:.5f} rcnb {3:.5f} lr {4:.5f}". \
                                             format(np.array(rpn_class_loss_history[-200:]).mean(),
                                             np.array(rpn_bbox_loss_history[-200:]).mean(),
                                             np.array(rcnn_class_loss_history[-200:]).mean(),
@@ -146,18 +151,26 @@ def train_epoch(epochs=1, filename=None):
                 rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = train_step(inputs)
     if hvd.rank()==0 and filename:
         model.save_weights(filename)
-    
-train_epoch(epochs=2, filename = 'rcnn_keras_resnet_50_stage_1.h5')
-
-    
-for layer in model.layers[0].layers[0].layers[142:]:
-    if type(layer)!=BatchNormalization:
-        layer.trainable=True
-
-train_epoch(epochs=4, filename = 'rcnn_keras_resnet_50_stage_2.h5')
 
 for layer in model.layers[0].layers[0].layers[80:]:
     if type(layer)!=BatchNormalization:
         layer.trainable=True
-        
-train_epoch(epochs=6, filename = 'rcnn_keras_resnet_50_stage_3.h5')
+
+train_epoch(epochs=15, filename = 'learning_rate_tuning/rcnn_keras_resnet_50_stage_1.h5')
+
+    
+'''for layer in model.layers[0].layers[0].layers[142:]:
+    if type(layer)!=BatchNormalization:
+        layer.trainable=True
+
+#train_epoch(epochs=4, filename = 'rcnn_keras_resnet_50_stage_2.h5')
+
+for layer in model.layers[0].layers[0].layers[80:]:
+    if type(layer)!=BatchNormalization:
+        layer.trainable=True
+
+#train_epoch(epochs=6, filename = 'rcnn_keras_resnet_50_stage_3.h5')
+
+model.load_weights('rcnn_keras_resnet_50_stage_3.h5')
+
+train_epoch(epochs=6, filename = 'rcnn_keras_resnet_50_stage_4.h5')'''

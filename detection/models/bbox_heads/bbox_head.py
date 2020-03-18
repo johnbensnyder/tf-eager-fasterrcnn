@@ -99,7 +99,7 @@ class BBoxHead(tf.keras.Model):
             detections_list: List of [num_detections, (y1, x1, y2, x2, class_id, score)]
                 coordinates are in pixel coordinates.
         '''
-        batch_size = img_metas.shape[0]
+        batch_size = tf.shape(img_metas)[0]
         rcnn_probs = tf.reshape(rcnn_probs, (batch_size, -1, self.num_classes))
         rcnn_deltas = tf.reshape(rcnn_deltas, (batch_size, -1, self.num_classes, 4))
         rois = tf.reshape(rois, (batch_size, -1, 5))[:, :, 1:5]
@@ -110,7 +110,7 @@ class BBoxHead(tf.keras.Model):
         detections_list = [
             self._get_bboxes_single(
                 rcnn_probs[i], rcnn_deltas[i], rois[i], pad_shapes[i])
-            for i in range(img_metas.shape[0])
+            for i in range(tf.shape(img_metas)[0])
         ]
         return detections_list
     
