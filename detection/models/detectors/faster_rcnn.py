@@ -33,7 +33,7 @@ class FasterRCNN(tf.keras.Model, RPNTestMixin, BBoxTestMixin):
         self.RPN_NEG_IOU_THR = 0.3
 
         # ROIs kept configuration
-        self.PRN_PROPOSAL_COUNT = 500
+        self.PRN_PROPOSAL_COUNT = 2000
         self.PRN_NMS_THRESHOLD = 0.5
         
         # RCNN configuration
@@ -67,9 +67,11 @@ class FasterRCNN(tf.keras.Model, RPNTestMixin, BBoxTestMixin):
         # Modules
         '''self.backbone = resnet.ResNet(depth=101, 
             name='res_net')'''
+        
         self.backbone = keras_resnet.ResNet(
             depth=50, 
             name='res_net')
+        
         '''self.backbone = matterport_resnet. \
         build_resnet(weights_file = '/workspace/shared_workspace/mask_rcnn_coco_2.h5')'''
         

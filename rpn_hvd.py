@@ -32,11 +32,12 @@ img_mean = (123.68, 116.779, 103.939)
 img_std = (1., 1., 1.)
 #img_std = (127.5, 127.5, 127.5)
 images = 118000
-batch_size = 4
-learning_rate = batch_size*hvd.size()*1e-3
+batch_size = 1
+learning_rate = (batch_size*hvd.size()*1e-3)
 warmup_rate = learning_rate/10
 warmup_steps = 2000
 loss_weights = [1, 1, 1, 1]
+loss_divider = np.array(loss_weights).sum()/4
 steps_per_epoch = images//(batch_size*hvd.size())
 
 ############################################################################################################
@@ -119,14 +120,15 @@ _ = model((imgs, img_metas, bboxes, labels))
 #model.layers[0].load_weights('resnet_101_backbone.h5')
 '''for layer in model.layers[0].layers[0].layers[:142]:
     layer.trainable=False'''
-#model.layers[0].trainable=False
+model.layers[0].trainable=False
 #model.layers[4].trainable=False
 #model.layers[0].load_weights('resnet_101_backbone.h5')
-model.layers[0].trainable=False
+'''model.layers[0].trainable=False
 for layer in model.layers[0].layers[0].layers[80:]:
     if type(layer)!=BatchNormalization:
-        layer.trainable=True
+        layer.trainable=True'''
 
+#model.load_weights('/workspace/shared_workspace/tf-eager-fasterrcnn/faster_rcnn.h5')
 ############################################################################################################
 # create training step and epoch
 ############################################################################################################
@@ -136,12 +138,13 @@ for layer in model.layers[0].layers[0].layers[80:]:
 #                                              steps_per_epoch*12, learning_rate*1e-1)
 #scheduler = tf.keras.optimizers.schedules.PiecewiseConstantDecay([steps_per_epoch*5],
 #                                                                 [1e-3, 1e-4])
-scheduler = schedulers.WarmupPiecewiseConstantDecay(warmup_rate, steps_per_epoch//4, [steps_per_epoch*12],
+scheduler = schedulers.WarmupPiecewiseConstantDecay(warmup_rate, steps_per_epoch, [steps_per_epoch*10],
                                          [learning_rate, learning_rate*1e-1])
 #optimizer = tf.keras.optimizers.SGD(1e-3, momentum=0.9, nesterov=True, clipnorm=5.0)
-#optimizer = tf.keras.optimizers.SGD(1e-3, momentum=0.9, nesterov=True)
+#optimizer = tf.keras.optimizers.SGD(scheduler, momentum=0.9, nesterov=True)
 optimizer = tfa.optimizers.SGDW(1e-4, scheduler, momentum=0.9, nesterov=True)
 #optimizer = tfa.optimizers.AdamW(1e-4, scheduler)
+#optimizer = tfa.optimizers.LAMB(learning_rate=scheduler, weight_decay_rate=5e-4)
 optimizer = tf.keras.mixed_precision.experimental.LossScaleOptimizer(optimizer, "dynamic")
 
 @tf.function(experimental_relax_shapes=True)
@@ -153,21 +156,22 @@ def train_step(inputs):
         loss_value = (loss_weights[0] * rpn_class_loss \
                       + loss_weights[1] * rpn_bbox_loss \
                       + loss_weights[2] * rcnn_class_loss \
-                      + loss_weights[3] * rcnn_bbox_loss)
+                      + loss_weights[3] * rcnn_bbox_loss)/loss_divider
         scaled_loss = optimizer.get_scaled_loss(loss_value)
     tape = hvd.DistributedGradientTape(tape)
     scaled_grads = tape.gradient(scaled_loss, model.trainable_variables)
     #grads = tape.gradient(loss_value, model.trainable_variables)
     grads = optimizer.get_unscaled_gradients(scaled_grads)
-    grads = [tf.clip_by_norm(g, 2.0) for g in grads]
+    grads = [tf.clip_by_norm(g, 5.0) for g in grads]
     grads = [grad if grad is not None \
              else tf.zeros_like(var) \
              for var, grad in zip(model.trainable_variables, grads)]
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
-    return rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss
+    return loss_value, rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss
 
 def train_epoch(epochs=1, filename=None):
     for epoch in range(epochs):
+        loss_value_history = []
         rpn_class_loss_history = []
         rpn_bbox_loss_history = []
         rcnn_class_loss_history = []
@@ -176,14 +180,16 @@ def train_epoch(epochs=1, filename=None):
             progressbar = tqdm(range(steps_per_epoch))
             for batch in progressbar:
                 inputs = next(train_tf_dataset)
-                rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = train_step(inputs)
+                loss_value, rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = train_step(inputs)
+                loss_value_history.append(loss_value)
                 rpn_class_loss_history.append(rpn_class_loss)
                 rpn_bbox_loss_history.append(rpn_bbox_loss)
                 rcnn_class_loss_history.append(rcnn_class_loss)
                 rcnn_bbox_loss_history.append(rcnn_bbox_loss)
-                if batch%1==0:
-                    progressbar.set_description("rpnc: {0:.5f} rpnb {1:.5f} rcnc {2:.5f} rcnb {3:.5f} lr {4:.5f}". \
-                                            format(np.array(rpn_class_loss_history[-200:]).mean(),
+                if batch%10==0:
+                    progressbar.set_description("loss {0:.5f} rpnc: {1:.5f} rpnb {2:.5f} rcnc {3:.5f} rcnb {4:.5f} lr {5:.5f}". \
+                                            format(np.array(loss_value_history[-200:]).mean(),
+                                            np.array(rpn_class_loss_history[-200:]).mean(),
                                             np.array(rpn_bbox_loss_history[-200:]).mean(),
                                             np.array(rcnn_class_loss_history[-200:]).mean(),
                                             np.array(rcnn_bbox_loss_history[-200:]).mean(),
@@ -192,7 +198,7 @@ def train_epoch(epochs=1, filename=None):
         else:
             for batch in range(steps_per_epoch):
                 inputs = next(train_tf_dataset)
-                rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = train_step(inputs)
+                loss_value, rpn_class_loss, rpn_bbox_loss, rcnn_class_loss, rcnn_bbox_loss = train_step(inputs)
     if hvd.rank()==0 and filename:
         model.save_weights(filename)
 
@@ -228,6 +234,9 @@ def evaluate(steps=100):
     
     
 
-for i in range(15):
+for i in range(20):
     train_epoch(epochs=1, filename = 'rcnn_keras_resnet_50_stage_{}.h5'.format(i))
-    evaluate()
+    hvd.allreduce(tf.constant(0))
+    if hvd.rank()==0:
+        evaluate()
+    hvd.allreduce(tf.constant(0))

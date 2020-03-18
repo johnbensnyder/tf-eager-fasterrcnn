@@ -64,6 +64,6 @@ class WarmupPiecewiseConstantDecay(tf.keras.optimizers.schedules.PiecewiseConsta
         return ((self.scaled_rate*step)+(self.initial_learning_rate*(self.steps_at_scale-step)))/self.steps_at_scale
     
     def get_config(self):
-        return {"initial_rate": self.initial_rate, "scaled_rate": self.scaled_rate, 
+        return {"initial_learning_rate": self.initial_learning_rate, "scaled_rate": self.scaled_rate, 
                 "steps_at_scale": self.steps_at_scale, "boundaries": self.boundaries, 
                 "values": self.values, "name": self.name}
